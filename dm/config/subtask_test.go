@@ -419,3 +419,40 @@ func TestSubTaskConfigMarshalAtomic(t *testing.T) {
 	require.Equal(t, cfg.IOTotalBytes.Load(), uint64(110))
 	require.Equal(t, cfg.DumpIOTotalBytes.Load(), uint64(210))
 }
+
+func TestLoaderConfigImportModeImportInto(t *testing.T) {
+	cfg := &SubTaskConfig{
+		Name:     "test",
+		SourceID: "source",
+		Mode:     ModeFull,
+		From: dbconfig.DBConfig{
+			Host: "127.0.0.1",
+			Port: 3306,
+			User: "root",
+		},
+		To: dbconfig.DBConfig{
+			Host: "127.0.0.1",
+			Port: 4000,
+			User: "root",
+		},
+	}
+
+	// Test import-into mode is valid
+	cfg.LoaderConfig = LoaderConfig{
+		PoolSize:   defaultPoolSize,
+		Dir:        "s3://bucket/prefix",
+		ImportMode: LoadModeImportInto,
+	}
+	err := cfg.Adjust(false)
+	require.NoError(t, err)
+	require.Equal(t, LoadModeImportInto, cfg.LoaderConfig.ImportMode)
+
+	// Test invalid mode
+	cfg.LoaderConfig = LoaderConfig{
+		PoolSize:   defaultPoolSize,
+		Dir:        "s3://bucket/prefix",
+		ImportMode: "invalid-mode",
+	}
+	err = cfg.Adjust(false)
+	require.ErrorContains(t, err, "invalid load mode")
+}
