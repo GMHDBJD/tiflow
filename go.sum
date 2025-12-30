@@ -370,6 +370,12 @@ github.com/glebarez/go-sqlite v1.21.2 h1:3a6LFC4sKahUunAmynQKLZceZCOzUthkRkEAl9g
 github.com/glebarez/go-sqlite v1.21.2/go.mod h1:sfxdZyhQjTM2Wry3gVYWaW072Ri1WMdWJi0k6+3382k=
 github.com/glebarez/sqlite v1.7.0 h1:A7Xj/KN2Lvie4Z4rrgQHY8MsbebX3NyWsL3n2i82MVI=
 github.com/glebarez/sqlite v1.7.0/go.mod h1:PkeevrRlF/1BhQBCnzcMWzgrIk7IOop+qS2jUYLfHhk=
+github.com/gmhdbjd/client-go/v2 v2.0.0-20251230131433-c67b44c05313 h1:WN4jReyFEiDO/IaCrg6VNqVQh25ieOpEmaZrq6P8zX0=
+github.com/gmhdbjd/client-go/v2 v2.0.0-20251230131433-c67b44c05313/go.mod h1:eT36gk399I+J7zlb2l2B8fLPxHr8CBh44UG2h95FUXk=
+github.com/gmhdbjd/tidb v1.1.0-beta.0.20251230130634-558dcd775455 h1:w4Jbu0eJuPTvxq/oBRUvGvTT4dSR7XPRD8lWGJ2CiCg=
+github.com/gmhdbjd/tidb v1.1.0-beta.0.20251230130634-558dcd775455/go.mod h1:GemVpapKyb0DOZimxUtNtaA+sYqGLM9+QGhY/DX+KNU=
+github.com/gmhdbjd/tidb/pkg/parser v0.0.0-20251229182910-99de205e6b3b h1:4OCxXdIOaT9TWwlo/wRHQiEpIMd9eBhAM/BLD7T7fJ0=
+github.com/gmhdbjd/tidb/pkg/parser v0.0.0-20251229182910-99de205e6b3b/go.mod h1:oHE+ub2QaDERd+UNHe4z2BhFV2jZrm7VNOe6atR9AF4=
 github.com/go-asn1-ber/asn1-ber v1.5.4 h1:vXT6d/FNDiELJnLb6hGNa309LMsrCoYFvpwHDF0+Y1A=
 github.com/go-asn1-ber/asn1-ber v1.5.4/go.mod h1:hEBeB/ic+5LoWskz+yKT7vGhhPYkProFKoKdwZRWMe0=
 github.com/go-chi/chi/v5 v5.0.0/go.mod h1:BBug9lr0cqtdAhsu6R4AAdvufI0/XBzAQSsUqJpoZOs=
