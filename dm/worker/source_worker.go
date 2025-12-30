@@ -23,6 +23,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	importinto "github.com/pingcap/tidb/lightning/pkg/importinto"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
@@ -218,6 +219,8 @@ func (w *SourceWorker) Stop(graceful bool) {
 	w.Lock()
 	defer w.Unlock()
 
+	// mark failover cancel so import-into treats this stop as failover (both graceful and ungraceful)
+	importinto.SetFailoverCancel(true)
 	// close or kill all subtasks
 	if graceful {
 		w.subTaskHolder.closeAllSubTasks()

@@ -166,6 +166,42 @@ func TestSubTaskAdjustFail(t *testing.T) {
 			},
 			"Message: online scheme rtc not supported",
 		},
+		{
+			func() *SubTaskConfig {
+				cfg := newSubTaskConfig()
+				cfg.ShardMode = ShardPessimistic
+				cfg.LoaderConfig.ImportMode = LoadModeImportInto
+				return cfg
+			},
+			"Message: import-into mode does not support sharding",
+		},
+		{
+			func() *SubTaskConfig {
+				cfg := newSubTaskConfig()
+				cfg.IsSharding = true
+				cfg.LoaderConfig.ImportMode = LoadModeImportInto
+				return cfg
+			},
+			"Message: import-into mode does not support sharding",
+		},
+		{
+			func() *SubTaskConfig {
+				cfg := newSubTaskConfig()
+				cfg.LoaderConfig.ImportMode = LoadModeImportInto
+				cfg.LoaderConfig.Dir = "/local/path"
+				return cfg
+			},
+			"Message: import-into mode requires shared storage",
+		},
+		{
+			func() *SubTaskConfig {
+				cfg := newSubTaskConfig()
+				cfg.LoaderConfig.ImportMode = LoadModeImportInto
+				cfg.LoaderConfig.Dir = "./relative/path"
+				return cfg
+			},
+			"Message: import-into mode requires shared storage",
+		},
 	}
 
 	for _, tc := range testCases {
