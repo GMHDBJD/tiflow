@@ -16,6 +16,7 @@ package loader
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -127,8 +128,33 @@ func MakeGlobalConfig(cfg *config.SubTaskConfig) *lcfg.GlobalConfig {
 		lightningCfg.TikvImporter.SortedKVDir = cfg.SortingDirPhysical
 	}
 	lightningCfg.Mydumper.SourceDir = cfg.Dir
+	if cfg.LoaderConfig.ImportMode == config.LoadModePhysical {
+		lightningCfg.Mydumper.SourceDir = stripS3ExternalIDFromSourceDir(lightningCfg.Mydumper.SourceDir)
+	}
 	lightningCfg.App.Config.File = "" // make lightning not init logger, see more in https://github.com/pingcap/tidb/pull/29291
 	return lightningCfg
+}
+
+func stripS3ExternalIDFromSourceDir(sourceDir string) string {
+	u, err := url.Parse(sourceDir)
+	if err != nil || !strings.EqualFold(u.Scheme, "s3") || u.RawQuery == "" {
+		return sourceDir
+	}
+
+	values := u.Query()
+	changed := false
+	for key := range values {
+		if strings.EqualFold(key, "external-id") || strings.EqualFold(key, "external_id") {
+			values.Del(key)
+			changed = true
+		}
+	}
+	if !changed {
+		return sourceDir
+	}
+
+	u.RawQuery = values.Encode()
+	return u.String()
 }
 
 // Type implements Unit.Type.
