@@ -14,10 +14,13 @@
 package binlogstream
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -34,6 +37,13 @@ import (
 var ErrArchiveComplete = errors.New("local binlog archive complete")
 
 var errArchiveRotate = errors.New("advance to next archive file")
+
+// Match the go-mysql client's default read buffer and BinlogSyncer's default
+// event cache. This aligns buffering, not the file and replication protocols.
+const (
+	archiveReadBufferSize  = 64 * 1024
+	archiveEventCacheCount = 10240
+)
 
 type archiveResult struct {
 	event *replication.BinlogEvent
@@ -69,7 +79,11 @@ func (r *archiveReader) GenerateStreamFrom(location binlog.Location) (reader.Str
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
-	r.results = make(chan archiveResult, 128)
+	cacheCount := r.cfg.EventCacheCount
+	if cacheCount <= 0 {
+		cacheCount = archiveEventCacheCount
+	}
+	r.results = make(chan archiveResult, cacheCount)
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
@@ -99,7 +113,7 @@ func (r *archiveReader) read(ctx context.Context, start mysql.Position) error {
 		parser.SetRowsEventDecodeFunc(r.cfg.RowsEventDecodeFunc)
 		next := ""
 		first := true
-		err := parser.ParseFile(filepath.Join(r.directory, name), int64(offset), func(e *replication.BinlogEvent) error {
+		err := parseArchiveFile(parser, filepath.Join(r.directory, name), int64(offset), func(e *replication.BinlogEvent) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -155,6 +169,42 @@ func (r *archiveReader) read(ctx context.Context, start mysql.Position) error {
 			return fmt.Errorf("local binlog %s ended before configured end %s: %w", name, r.end, io.ErrUnexpectedEOF)
 		}
 	}
+}
+
+// parseArchiveFile preserves ParseFile's format-description bootstrap when
+// resuming from a nonzero offset, but buffers small header/body reads. The
+// parser still owns full event decoding and checksum verification.
+func parseArchiveFile(parser *replication.BinlogParser, name string, offset int64, onEvent replication.OnEventFunc) error {
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	buffered := bufio.NewReaderSize(f, archiveReadBufferSize)
+	var magic [4]byte
+	if _, err = io.ReadFull(buffered, magic[:]); err != nil {
+		return err
+	}
+	if !bytes.Equal(magic[:], replication.BinLogFileHeader) {
+		return fmt.Errorf("invalid binlog file header in %s", name)
+	}
+	if offset > 4 {
+		// Initial FDE supplies decoding state; read() marks its position as zero
+		// so it cannot advance the requested workload's location.
+		eof, err := parser.ParseSingleEvent(buffered, onEvent)
+		if err != nil {
+			return err
+		}
+		if eof {
+			return io.ErrUnexpectedEOF
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return err
+		}
+		// A seek invalidates any prefetched bytes, including bytes beyond FDE.
+		buffered.Reset(f)
+	}
+	return parser.ParseReader(buffered, onEvent)
 }
 
 func (r *archiveReader) GetEvent(ctx context.Context) (*replication.BinlogEvent, error) {

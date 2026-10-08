@@ -121,6 +121,16 @@ cache conditions, run interval, logs, profiles, metrics and failures. Keep
 warm-up, repeated runs and pause/restart lifecycle tests separate from throughput
 measurements. Local disk and the archive reader may still bottleneck.
 
+The archive reader uses a 64 KiB file-read buffer and a default 10,240-event
+queue, matching the current go-mysql remote client's read-buffer and event-cache
+defaults. It still performs full event decoding and checksum verification, and
+uses the normal StreamerController location/GTID bookkeeping. This is **not the
+remote replication reader**: file framing uses ParseReader rather than MySQL
+packet reception and Parse, and does not measure network/protocol overhead.
+Do not interpret an archive-only rate as a production remote-reader limit.
+The queue is bounded by event count, not bytes; wide rows or large events can
+increase retained memory substantially. Record memory as well as throughput.
+
 The completion log includes separate `dataSQL` and `checkpointSQL` counters:
 submitted statements/parameters, commits and rollbacks. These are not source-row
 or source-transaction counts. Legacy query-status `totalRows` also includes some

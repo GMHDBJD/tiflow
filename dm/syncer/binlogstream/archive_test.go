@@ -15,8 +15,10 @@ package binlogstream
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +47,93 @@ func archiveFile(t *testing.T, dir, name, next string) (uint32, uint32) {
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), data, 0o600))
 	return fde.Header.LogPos, query.Header.LogPos
+}
+
+func TestArchiveEventCacheCount(t *testing.T) {
+	for _, size := range []int{0, -1, 1, 7} {
+		r := &archiveReader{
+			end: mysql.Position{Name: "mysql-bin.000001", Pos: 4},
+			cfg: replication.BinlogSyncerConfig{EventCacheCount: size},
+		}
+		loc := binlog.MustZeroLocation("mysql")
+		loc.Position = r.end
+		_, err := r.GenerateStreamFrom(loc)
+		require.NoError(t, err)
+		want := size
+		if want <= 0 {
+			want = 10240 // go-mysql BinlogStreamer's default event cache
+		}
+		require.Equal(t, want, cap(r.results))
+		_, err = r.GetEvent(context.Background())
+		require.ErrorIs(t, err, ErrArchiveComplete)
+		r.Close()
+	}
+}
+
+func TestBufferedArchiveMatchesParseFile(t *testing.T) {
+	h := &replication.EventHeader{ServerID: 1, Timestamp: 1700000000}
+	fde, err := event.GenFormatDescriptionEvent(h, 4)
+	require.NoError(t, err)
+	large, err := event.GenQueryEvent(h, fde.Header.LogPos, 0, 0, 0, nil, []byte("test"), []byte(strings.Repeat("x", 2*archiveReadBufferSize+17)))
+	require.NoError(t, err)
+	last, err := event.GenQueryEvent(h, large.Header.LogPos, 0, 0, 0, nil, []byte("test"), []byte("CREATE TABLE t (id INT)"))
+	require.NoError(t, err)
+	data := append([]byte{}, replication.BinLogFileHeader...)
+	for _, e := range []*replication.BinlogEvent{fde, large, last} {
+		data = append(data, e.RawData...)
+	}
+	name := filepath.Join(t.TempDir(), "mysql-bin.000001")
+	require.NoError(t, os.WriteFile(name, data, 0o600))
+	newParser := func() *replication.BinlogParser {
+		p := replication.NewBinlogParser()
+		p.SetVerifyChecksum(true)
+		return p
+	}
+	// Resume before and after a >64 KiB event, and at EOF. The initial FDE
+	// prefetch must not leak into the post-seek stream or lose decoding state.
+	for _, offset := range []uint32{4, fde.Header.LogPos, large.Header.LogPos, last.Header.LogPos} {
+		var expected, actual []*replication.BinlogEvent
+		require.NoError(t, newParser().ParseFile(name, int64(offset), func(e *replication.BinlogEvent) error {
+			expected = append(expected, e)
+			return nil
+		}))
+		require.NoError(t, parseArchiveFile(newParser(), name, int64(offset), func(e *replication.BinlogEvent) error {
+			actual = append(actual, e)
+			return nil
+		}))
+		require.Equal(t, expected, actual, "offset %d", offset)
+	}
+	stop := errors.New("stop consuming")
+	for _, offset := range []int64{4, int64(large.Header.LogPos)} {
+		err = parseArchiveFile(newParser(), name, offset, func(*replication.BinlogEvent) error { return stop })
+		require.ErrorIs(t, err, stop)
+	}
+	for _, length := range []int{0, 3, len(data) - 1} {
+		require.NoError(t, os.WriteFile(name, data[:length], 0o600))
+		err = parseArchiveFile(newParser(), name, 4, func(*replication.BinlogEvent) error { return nil })
+		require.Error(t, err, "length %d", length)
+	}
+	// go-mysql treats an incomplete event header as EOF; the archive boundary
+	// check must still reject this as an incomplete workload, never success.
+	require.NoError(t, os.WriteFile(name, data[:5], 0o600))
+	r := &archiveReader{directory: filepath.Dir(name), end: mysql.Position{Name: filepath.Base(name), Pos: last.Header.LogPos}}
+	loc := binlog.MustZeroLocation("mysql")
+	loc.Position = mysql.Position{Name: filepath.Base(name), Pos: 4}
+	_, err = r.GenerateStreamFrom(loc)
+	require.NoError(t, err)
+	_, err = r.GetEvent(context.Background())
+	require.ErrorContains(t, err, "ended before configured end")
+	r.Close()
+	corrupt := append([]byte{}, data...)
+	corrupt[len(corrupt)-5] ^= 1 // complete event with invalid CRC32
+	require.NoError(t, os.WriteFile(name, corrupt, 0o600))
+	err = parseArchiveFile(newParser(), name, 4, func(*replication.BinlogEvent) error { return nil })
+	require.Error(t, err)
+	corrupt = append([]byte{}, data...)
+	corrupt[0] ^= 1
+	require.NoError(t, os.WriteFile(name, corrupt, 0o600))
+	err = parseArchiveFile(newParser(), name, 4, func(*replication.BinlogEvent) error { return nil })
+	require.ErrorContains(t, err, "invalid binlog file header")
 }
 
 func TestArchiveRotationAndRestart(t *testing.T) {
