@@ -531,6 +531,7 @@ func defaultValidatorConfig() ValidatorConfig {
 
 // TaskConfig is the configuration for Task.
 type TaskConfig struct {
+	Blackhole     bool `yaml:"blackhole,omitempty" toml:"blackhole,omitempty" json:"blackhole,omitempty"`
 	*flag.FlagSet `yaml:"-" toml:"-" json:"-"`
 
 	Name                      string `yaml:"name" toml:"name" json:"name"`
@@ -746,7 +747,15 @@ func (c *TaskConfig) adjust() error {
 		log.L().Warn("'online-ddl-scheme' will be deprecated soon. Recommend that use online-ddl instead of online-ddl-scheme.")
 	}
 
-	if c.TargetDB == nil {
+	if c.Blackhole {
+		if c.TaskMode != ModeIncrement || c.IsSharding || c.ShardMode != "" || c.OnlineDDL {
+			return fmt.Errorf("blackhole requires incremental, non-sharded replication without online DDL")
+		}
+		if c.TargetDB != nil {
+			return fmt.Errorf("blackhole must not specify target-database")
+		}
+	}
+	if c.TargetDB == nil && !c.Blackhole {
 		return terror.ErrConfigNeedTargetDB.Generate()
 	}
 
@@ -1117,10 +1126,19 @@ func checkValidExpr(expr string) error {
 
 // YamlForDowngrade returns YAML format represents of config for downgrade.
 func (c *TaskConfig) YamlForDowngrade() (string, error) {
+	// Offline mode cannot run on older binaries. Preserve explicit false values
+	// (notably online-ddl) rather than applying old-version default omission.
+	if c.Blackhole {
+		data, err := yaml.Marshal(c)
+		return string(data), err
+	}
+
 	t := NewTaskConfigForDowngrade(c)
 
 	// try to encrypt password
-	t.TargetDB.Password = utils.EncryptOrPlaintext(utils.DecryptOrPlaintext(t.TargetDB.Password))
+	if t.TargetDB != nil {
+		t.TargetDB.Password = utils.EncryptOrPlaintext(utils.DecryptOrPlaintext(t.TargetDB.Password))
+	}
 
 	// omit default values, so we can ignore them for later marshal
 	t.omitDefaultVals()
@@ -1254,6 +1272,7 @@ func (c *SyncerConfigForDowngrade) omitDefaultVals() {
 // This config is used for downgrade(config export) from a higher dmctl version.
 // When we add any new config item into SourceConfig, we should update it also.
 type TaskConfigForDowngrade struct {
+	Blackhole               bool                                 `yaml:"blackhole,omitempty"`
 	Name                    string                               `yaml:"name"`
 	MetricLabels            map[string]string                    `yaml:"metric-labels,omitempty"`
 	TaskMode                string                               `yaml:"task-mode"`
@@ -1290,7 +1309,11 @@ type TaskConfigForDowngrade struct {
 
 // NewTaskConfigForDowngrade create new TaskConfigForDowngrade.
 func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
-	targetDB := *taskConfig.TargetDB
+	var targetDB *dbconfig.DBConfig
+	if taskConfig.TargetDB != nil {
+		copy := *taskConfig.TargetDB
+		targetDB = &copy
+	}
 	return &TaskConfigForDowngrade{
 		Name:                      taskConfig.Name,
 		MetricLabels:              maps.Clone(taskConfig.MetricLabels),
@@ -1305,7 +1328,8 @@ func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
 		HeartbeatReportInterval:   taskConfig.HeartbeatReportInterval,
 		Timezone:                  taskConfig.Timezone,
 		CaseSensitive:             taskConfig.CaseSensitive,
-		TargetDB:                  &targetDB,
+		TargetDB:                  targetDB,
+		Blackhole:                 taskConfig.Blackhole,
 		OnlineDDLScheme:           taskConfig.OnlineDDLScheme,
 		Routes:                    taskConfig.Routes,
 		Filters:                   taskConfig.Filters,

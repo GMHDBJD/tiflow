@@ -43,6 +43,19 @@ func CheckSyncConfig(ctx context.Context, cfgs []*config.SubTaskConfig, errCnt, 
 		return "", nil
 	}
 
+	for _, cfg := range cfgs {
+		if err := cfg.VerifyLocalBinlog(); err != nil {
+			return "", err
+		}
+	}
+	if cfgs[0].Blackhole {
+		for _, cfg := range cfgs {
+			if !cfg.Blackhole {
+				return "", fmt.Errorf("cannot mix blackhole and database targets")
+			}
+		}
+		return "local-binlog/blackhole configuration checked; archive and schema files will be checked on the worker (database checks not applicable)", nil
+	}
 	// all `IgnoreCheckingItems` and `Mode` of sub-task are same, so we take first one
 	// for ModeFull we don't need replication privilege; for ModeIncrement we don't need dump privilege
 	ignoreCheckingItems := cfgs[0].IgnoreCheckingItems

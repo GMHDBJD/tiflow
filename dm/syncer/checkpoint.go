@@ -344,6 +344,7 @@ type RemoteCheckPoint struct {
 	cfg           *config.SubTaskConfig
 	metricProxies *metrics.Proxies
 
+	blackhole *conn.Blackhole // non-durable execution target; all write paths are shared
 	db        *conn.BaseDB
 	dbConn    *dbconn.DBConn
 	tableName string // qualified table name: schema is set through task config, table is task name
@@ -397,6 +398,9 @@ func NewRemoteCheckPoint(
 		snapshotSeq:   0,
 	}
 
+	if cfg.Blackhole {
+		cp.blackhole = &conn.Blackhole{}
+	}
 	return cp
 }
 
@@ -482,7 +486,11 @@ func (cp *RemoteCheckPoint) Init(tctx *tcontext.Context) (err error) {
 
 	checkPointDB := cp.cfg.To
 	checkPointDB.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(maxCheckPointTimeout)
-	db, dbConns, err = dbconn.CreateConns(tctx, cp.cfg, conn.DownstreamDBConfig(&checkPointDB), 1, cp.cfg.IOTotalBytes, cp.cfg.UUID)
+	if cp.blackhole != nil {
+		db, dbConns, err = dbconn.CreateBlackholeConns(tctx, cp.cfg, cp.blackhole, 1)
+	} else {
+		db, dbConns, err = dbconn.CreateConns(tctx, cp.cfg, conn.DownstreamDBConfig(&checkPointDB), 1, cp.cfg.IOTotalBytes, cp.cfg.UUID)
+	}
 	if err != nil {
 		return
 	}
@@ -712,6 +720,7 @@ func (cp *RemoteCheckPoint) FlushPointsExcept(
 	cp.Lock()
 
 	if len(cp.snapshots) == 0 || cp.snapshots[0].id != snapshotID {
+		cp.Unlock()
 		return errors.Errorf("snapshot %d not found", snapshotID)
 	}
 	snapshotCp := cp.snapshots[0]
@@ -751,6 +760,7 @@ func (cp *RemoteCheckPoint) FlushPointsExcept(
 			if tableCP.outOfDateBy(point.location) {
 				tiBytes, err := json.Marshal(point.ti)
 				if err != nil {
+					cp.Unlock()
 					return terror.ErrSchemaTrackerCannotSerialize.Delegate(err, schema, table)
 				}
 
@@ -1027,6 +1037,11 @@ func (cp *RemoteCheckPoint) createTable(tctx *tcontext.Context) error {
 
 // Load implements CheckPoint.Load.
 func (cp *RemoteCheckPoint) Load(tctx *tcontext.Context) error {
+	// A blackhole has no persisted state. Same-instance resume uses the existing
+	// saved/flushed points; a new instance starts from configured meta.
+	if cp.blackhole != nil {
+		return nil
+	}
 	cp.Lock()
 	defer cp.Unlock()
 

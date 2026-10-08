@@ -143,6 +143,7 @@ type StreamerController struct {
 	localBinlogDir string
 	timezone       *time.Location
 
+	archive        *archiveReader
 	streamProducer streamGenerator
 	upstream       locationStream
 
@@ -250,6 +251,16 @@ func (c *StreamerController) GetStreamer() reader.Streamer {
 }
 
 func (c *StreamerController) resetReplicationSyncer(tctx *tcontext.Context, location binlog.Location) (err error) {
+	if c.archive != nil {
+		c.streamProducer = c.archive
+		c.upstream, err = newLocationStream(c.archive, location)
+		if err == nil {
+			c.streamModifier.reset(location)
+			c.locations.reset(location)
+			c.lastEventFromUpstream = nil
+		}
+		return err
+	}
 	uuidSameWithUpstream := true
 
 	// close old streamProducer
@@ -552,6 +563,8 @@ func (c *StreamerController) close() {
 
 	if c.streamProducer != nil {
 		switch r := c.streamProducer.(type) {
+		case *archiveReader:
+			r.Close()
 		case *remoteBinlogReader:
 			// process remote binlog reader
 			r.reader.Close()
@@ -608,6 +621,9 @@ func (c *StreamerController) GetBinlogType() BinlogType {
 
 // CanRetry returns true if can switch from local to remote and retry again.
 func (c *StreamerController) CanRetry(err error) bool {
+	if c.archive != nil {
+		return false
+	}
 	c.RLock()
 	defer c.RUnlock()
 

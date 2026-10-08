@@ -159,7 +159,9 @@ func (w *SourceWorker) Start() {
 	}
 
 	var err error
-	w.sourceDB, err = conn.GetUpstreamDB(&w.cfg.GetDecryptedClone().From)
+	if w.cfg.LocalBinlog == nil {
+		w.sourceDB, err = conn.GetUpstreamDB(&w.cfg.GetDecryptedClone().From)
+	}
 	if err != nil {
 		w.l.Error("can't connected to upstream", zap.Error(err))
 	}
@@ -316,6 +318,13 @@ func (w *SourceWorker) updateSourceStatus(ctx context.Context, needLock bool, al
 	} else {
 		cfg = w.cfg
 	}
+	if cfg.LocalBinlog != nil {
+		loc := binlog.MustZeroLocation("mysql")
+		loc.Position = cfg.LocalBinlog.EndPosition()
+		w.sourceStatus.Store(&binlog.SourceStatus{Location: loc, UpdateTime: time.Now()})
+		w.clearSourceStatusErr()
+		return nil
+	}
 	// Ensure sourceDB exists (optionally reconnect), but never hold sourceDBMu while dialing upstream.
 	w.sourceDBMu.Lock()
 	sourceDB := w.sourceDB
@@ -383,6 +392,9 @@ func (w *SourceWorker) updateSourceStatus(ctx context.Context, needLock bool, al
 //   - when DM-worker Server watches a UpstreamRelayWorkerKeyAdapter change
 //   - when DM-worker Server fails watching and recovers from a snapshot
 func (w *SourceWorker) EnableRelay(startBySourceCfg bool) (err error) {
+	if w.cfg.LocalBinlog != nil {
+		return fmt.Errorf("relay cannot be enabled for local-binlog")
+	}
 	w.l.Info("enter EnableRelay")
 	w.Lock()
 	defer w.Unlock()
@@ -1143,6 +1155,7 @@ func (w *SourceWorker) OperateSchema(ctx context.Context, req *pb.OperateWorkerS
 // copyConfigFromSource copies config items from source config and worker's relayEnabled to sub task.
 func copyConfigFromSource(cfg *config.SubTaskConfig, sourceCfg *config.SourceConfig, enableRelay bool) error {
 	cfg.From = sourceCfg.From
+	cfg.LocalBinlog = sourceCfg.LocalBinlog
 
 	cfg.Flavor = sourceCfg.Flavor
 	cfg.ServerID = sourceCfg.ServerID
@@ -1170,7 +1183,7 @@ func copyConfigFromSource(cfg *config.SubTaskConfig, sourceCfg *config.SourceCon
 		}
 		cfg.FilterRules = append(cfg.FilterRules, filterRule)
 	}
-	return nil
+	return cfg.VerifyLocalBinlog()
 }
 
 // copyConfigFromSourceForEach do copyConfigFromSource for each value in subTaskCfgM and change subTaskCfgM in-place.

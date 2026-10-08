@@ -1,0 +1,147 @@
+CREATE DATABASE `b02_standard5g` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */;
+
+USE `b02_standard5g`;
+
+CREATE TABLE `sbtest1` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_1` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest10` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_10` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest11` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_11` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest12` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_12` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest13` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_13` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest14` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_14` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest15` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_15` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest16` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_16` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest2` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_2` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest3` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_3` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest4` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_4` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest5` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_5` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest6` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_6` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest7` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_7` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest8` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_8` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `sbtest9` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `k` int NOT NULL DEFAULT '0',
+  `c` char(120) NOT NULL DEFAULT '',
+  `pad` char(60) NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`),
+  KEY `k_9` (`k`)
+) ENGINE=InnoDB AUTO_INCREMENT=1700001 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

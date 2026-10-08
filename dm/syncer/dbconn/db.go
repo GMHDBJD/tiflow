@@ -325,11 +325,21 @@ func CreateConns(tctx *tcontext.Context, cfg *config.SubTaskConfig, dbCfg conn.S
 		dbCfg.Net = uuid
 	}
 
-	conns := make([]*DBConn, 0, count)
 	baseDB, err := conn.DefaultDBProvider.Apply(dbCfg)
 	if err != nil {
 		return nil, nil, err
 	}
+	return wrapBaseDB(tctx, cfg, baseDB, count)
+}
+
+// CreateBlackholeConns uses the same connection lifecycle as database targets,
+// replacing only the SQL driver. The sink is shared by this target's connections.
+func CreateBlackholeConns(tctx *tcontext.Context, cfg *config.SubTaskConfig, sink *conn.Blackhole, count int) (*conn.BaseDB, []*DBConn, error) {
+	return wrapBaseDB(tctx, cfg, conn.NewBlackholeDB(sink), count)
+}
+
+func wrapBaseDB(tctx *tcontext.Context, cfg *config.SubTaskConfig, baseDB *conn.BaseDB, count int) (*conn.BaseDB, []*DBConn, error) {
+	conns := make([]*DBConn, 0, count)
 	for i := 0; i < count; i++ {
 		baseConn, err := baseDB.GetBaseConn(tctx.Context())
 		if err != nil {

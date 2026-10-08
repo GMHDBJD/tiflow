@@ -1372,6 +1372,14 @@ func innerCheckAndAdjustSourceConfig(
 	cfg *config.SourceConfig,
 	hook func(sourceConfig *config.SourceConfig, ctx context.Context, db *conn.BaseDB) error,
 ) error {
+	if cfg.LocalBinlog != nil {
+		if err := cfg.Verify(); err != nil {
+			return err
+		}
+		cfg.Flavor = "mysql"
+		cfg.CaseSensitive = cfg.LocalBinlog.LowerCaseTableNames == 0
+		return nil
+	}
 	dbConfig := cfg.GenerateDBConfig()
 	fromDB, err := conn.GetUpstreamDB(dbConfig)
 	if err != nil {
@@ -1671,9 +1679,13 @@ func (s *Server) generateSubTask(
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
-	err = AdjustTargetDBSessionCfg(ctx, cfg.TargetDB)
-	if err != nil {
-		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
+	if !cfg.Blackhole {
+		err = AdjustTargetDBSessionCfg(ctx, cfg.TargetDB)
+		if err != nil {
+			return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
+		}
+	} else if cliArgs != nil && cliArgs.StartTime != "" {
+		return nil, nil, fmt.Errorf("blackhole requires explicit meta; start-time is unsupported")
 	}
 
 	sourceIDs := make([]string, 0, len(cfg.MySQLInstances))
@@ -1689,6 +1701,9 @@ func (s *Server) generateSubTask(
 	if cfg.TaskMode == config.ModeIncrement && (cliArgs == nil || cliArgs.StartTime == "") {
 		for _, inst := range cfg.MySQLInstances {
 			if inst.Meta == nil {
+				if cfg.Blackhole {
+					return nil, nil, fmt.Errorf("blackhole requires explicit meta for source %s", inst.SourceID)
+				}
 				sourceCfg := sourceCfgs[inst.SourceID]
 				meta, err2 := GetLatestMeta(ctx, sourceCfg.Flavor, &sourceCfg.From)
 				if err2 != nil {
@@ -1704,6 +1719,19 @@ func (s *Server) generateSubTask(
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
+	for _, stCfg := range stCfgs {
+		sourceCfg := sourceCfgs[stCfg.SourceID]
+		stCfg.LocalBinlog = sourceCfg.LocalBinlog
+		if stCfg.LocalBinlog != nil {
+			stCfg.Flavor = sourceCfg.Flavor
+			stCfg.EnableGTID = sourceCfg.EnableGTID
+			stCfg.UseRelay = sourceCfg.EnableRelay
+			stCfg.CaseSensitive = sourceCfg.CaseSensitive
+		}
+		if err := stCfg.VerifyLocalBinlog(); err != nil {
+			return nil, nil, err
+		}
+	}
 	var firstMode config.LoadMode
 	for _, stCfg := range stCfgs {
 		if firstMode == "" {
@@ -1730,6 +1758,7 @@ func (s *Server) generateSubTasksForCheck(stCfgs []*config.SubTaskConfig) ([]*co
 		}
 		stCfgsForCheck = append(stCfgsForCheck, stCfgForCheck)
 		if sourceCfg, ok := sourceCfgs[stCfgForCheck.SourceID]; ok {
+			stCfgsForCheck[i].LocalBinlog = sourceCfg.LocalBinlog
 			stCfgsForCheck[i].Flavor = sourceCfg.Flavor
 			stCfgsForCheck[i].ServerID = sourceCfg.ServerID
 			stCfgsForCheck[i].EnableGTID = sourceCfg.EnableGTID
@@ -1795,6 +1824,9 @@ func (s *Server) removeMetaDataWithTimeout(
 	failpoint.Inject("MockSkipRemoveMetaData", func() {
 		failpoint.Return(nil)
 	})
+	if toDBCfg == nil {
+		return s.removeInternalMetaData(taskName)
+	} // blackhole has no durable database metadata
 	toDBCfg.Adjust()
 
 	err := s.removeInternalMetaData(taskName)

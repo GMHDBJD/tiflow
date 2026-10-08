@@ -78,6 +78,7 @@ type downstreamTracker struct {
 	sync.RWMutex
 	se             sessionctx.Context
 	downstreamConn *dbconn.DBConn                  // downstream connection
+	mirrorSource   bool                            // explicitly enabled only for a blackhole target
 	stmtParser     *parser.Parser                  // statement parser
 	tableInfos     map[string]*DownstreamTableInfo // downstream table infos
 }
@@ -456,6 +457,17 @@ func (tr *Tracker) DropTable(table *filter.Table) error {
 	return tr.upstreamTracker.DeleteTable(ast.NewCIStr(table.Schema), ast.NewCIStr(table.Name))
 }
 
+// GetSchemaInfo returns the tracked database definition. Callers must not mutate it.
+func (tr *Tracker) GetSchemaInfo(name string) (*model.DBInfo, error) {
+	tr.RLock()
+	defer tr.RUnlock()
+	info := tr.upstreamTracker.SchemaByName(ast.NewCIStr(name))
+	if info == nil {
+		return nil, fmt.Errorf("schema %s is not tracked", name)
+	}
+	return info, nil
+}
+
 // CreateSchemaIfNotExists creates a SCHEMA of the given name if it did not exist.
 func (tr *Tracker) CreateSchemaIfNotExists(db string) error {
 	dbName := ast.NewCIStr(db)
@@ -534,6 +546,11 @@ func (tr *Tracker) BatchCreateTableIfNotExist(tablesToCreate map[string]map[stri
 	}
 	return nil
 }
+
+// UseSourceSchemaForDownstream makes a blackhole target use the tracked source
+// schema, including its indexes, for WHERE-handle selection and SQL generation.
+// Call immediately after Init, before processing any events.
+func (tr *Tracker) UseSourceSchemaForDownstream() { tr.downstreamTracker.mirrorSource = true }
 
 // GetDownStreamTableInfo gets downstream table info.
 // note. this function will init downstreamTrack's table info.
@@ -625,7 +642,16 @@ func (dt *downstreamTracker) getOrInit(tctx *tcontext.Context, tableID string, o
 	dti, ok = dt.tableInfos[tableID]
 	if !ok {
 		tctx.Logger.Info("Downstream schema tracker init. ", zap.String("tableID", tableID))
-		downstreamTI, err := dt.getTableInfoByCreateStmt(tctx, tableID)
+		var downstreamTI *model.TableInfo
+		var err error
+		if dt.mirrorSource {
+			if originTI == nil {
+				return nil, fmt.Errorf("blackhole schema missing for %s", tableID)
+			}
+			downstreamTI = originTI.Clone()
+		} else {
+			downstreamTI, err = dt.getTableInfoByCreateStmt(tctx, tableID)
+		}
 		if err != nil {
 			tctx.Logger.Error("Init dowstream schema info error. ", zap.String("tableID", tableID), zap.Error(err))
 			return nil, err

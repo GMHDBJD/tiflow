@@ -27,6 +27,8 @@ const (
 	RemoteBinlog BinlogType = iota + 1
 	// LocalBinlog means syncer is reading binlog from relay log.
 	LocalBinlog
+	// ArchiveBinlog means finite, immutable files supplied by the user.
+	ArchiveBinlog
 )
 
 // RelayToBinlogType converts relay.Process to BinlogType.
@@ -44,6 +46,8 @@ func (t BinlogType) String() string {
 		return "remote"
 	case LocalBinlog:
 		return "local"
+	case ArchiveBinlog:
+		return "archive"
 	default:
 		return "unknown"
 	}

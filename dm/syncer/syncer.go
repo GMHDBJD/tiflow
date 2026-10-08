@@ -118,6 +118,8 @@ const (
 
 // Syncer can sync your MySQL data to another MySQL database.
 type Syncer struct {
+	blackhole         *conn.Blackhole
+	localSchemaLoaded bool
 	sync.RWMutex
 
 	tctx *tcontext.Context // this ctx only used for logger.
@@ -305,8 +307,14 @@ func NewSyncer(cfg *config.SubTaskConfig, etcdClient *clientv3.Client, relay rel
 	syncer.cli = etcdClient
 
 	syncer.checkpoint = NewRemoteCheckPoint(syncer.tctx, cfg, syncer.metricsProxies, syncer.checkpointID())
+	if cfg.Blackhole {
+		syncer.blackhole = &conn.Blackhole{}
+	}
 
 	syncer.binlogType = binlogstream.RelayToBinlogType(relay)
+	if cfg.LocalBinlog != nil {
+		syncer.binlogType = binlogstream.ArchiveBinlog
+	}
 	syncer.fetchBinlogLogger = log.NewRetrySampleLogger(logger, zap.String("binlogType", syncer.binlogType.String()))
 	syncer.readerHub = streamer.GetReaderHub()
 
@@ -401,15 +409,33 @@ func (s *Syncer) Init(ctx context.Context) (err error) {
 	if err := config.CheckForeignKeyChecksSyncerOptions(s.cfg.To.Session, s.cfg.SyncerConfig); err != nil {
 		return err
 	}
-	s.upstreamTZ, s.upstreamTZStr, err = str2TimezoneOrFromDB(tctx, "", conn.UpstreamDBConfig(&s.cfg.From))
-	if err != nil {
+	if err := s.cfg.VerifyLocalBinlog(); err != nil {
 		return err
 	}
-	s.timezone, _, err = str2TimezoneOrFromDB(tctx, s.cfg.Timezone, conn.DownstreamDBConfig(&s.cfg.To))
-	if err != nil {
-		return err
-	}
+	if s.cfg.LocalBinlog != nil {
+		s.upstreamTZ, err = time.LoadLocation(s.cfg.LocalBinlog.Timezone)
+		if err != nil {
+			return err
+		}
+		s.upstreamTZStr = s.cfg.LocalBinlog.Timezone
+		s.timezone = s.upstreamTZ
+		if s.cfg.Timezone != "" {
+			s.timezone, _, err = str2TimezoneOrFromDB(tctx, s.cfg.Timezone, conn.DownstreamDBConfig(&s.cfg.To))
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		s.upstreamTZ, s.upstreamTZStr, err = str2TimezoneOrFromDB(tctx, "", conn.UpstreamDBConfig(&s.cfg.From))
+		if err != nil {
+			return err
+		}
+		s.timezone, _, err = str2TimezoneOrFromDB(tctx, s.cfg.Timezone, conn.DownstreamDBConfig(&s.cfg.To))
+		if err != nil {
+			return err
+		}
 
+	}
 	s.baList, err = filter.New(s.cfg.CaseSensitive, s.cfg.BAList)
 	if err != nil {
 		return terror.ErrSyncerUnitGenBAList.Delegate(err)
@@ -443,6 +469,9 @@ func (s *Syncer) Init(ctx context.Context) (err error) {
 		s.tctx.L(),
 	)
 
+	if s.cfg.LocalBinlog != nil {
+		s.streamerController = binlogstream.NewArchiveController(s.cfg.LocalBinlog.Directory, s.cfg.LocalBinlog.EndPosition(), s.syncCfg, s.tctx.L())
+	}
 	s.binlogFilter, err = bf.NewBinlogEvent(s.cfg.CaseSensitive, s.cfg.FilterRules)
 	if err != nil {
 		return terror.ErrSyncerUnitGenBinlogEventFilter.Delegate(err)
@@ -483,7 +512,7 @@ func (s *Syncer) Init(ctx context.Context) (err error) {
 
 	var schemaMap map[string]string
 	var tableMap map[string]map[string]string
-	if s.SourceTableNamesFlavor == conn.LCTableNamesSensitive {
+	if s.cfg.LocalBinlog == nil && s.SourceTableNamesFlavor == conn.LCTableNamesSensitive {
 		// TODO: we should avoid call this function multi times
 		allTables, err1 := conn.FetchAllDoTables(ctx, s.fromDB.BaseDB, s.baList)
 		if err1 != nil {
@@ -520,7 +549,7 @@ func (s *Syncer) Init(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	if s.SourceTableNamesFlavor == conn.LCTableNamesSensitive {
+	if s.cfg.LocalBinlog == nil && s.SourceTableNamesFlavor == conn.LCTableNamesSensitive {
 		if err = s.checkpoint.CheckAndUpdate(ctx, schemaMap, tableMap); err != nil {
 			return err
 		}
@@ -813,8 +842,8 @@ func (s *Syncer) Process(ctx context.Context, pr chan pb.ProcessResult) {
 	}()
 
 	err := s.Run(newCtx)
-	if err != nil {
-		// returned error rather than sent to runFatalChan
+	if err != nil || s.cfg.LocalBinlog != nil {
+		// returned error or finite archive completion
 		// cancel goroutines created in s.Run
 		cancel()
 	}
@@ -880,6 +909,9 @@ func (s *Syncer) getTableInfo(tctx *tcontext.Context, sourceTable, targetTable *
 
 // getDBInfoFromDownstream tries to track the db info from the downstream. It will not overwrite existing table.
 func (s *Syncer) getDBInfoFromDownstream(tctx *tcontext.Context, sourceTable, targetTable *filter.Table) (*model.DBInfo, error) {
+	if s.cfg != nil && s.cfg.Blackhole {
+		return s.schemaTracker.GetSchemaInfo(sourceTable.Schema)
+	}
 	// TODO: Switch to use the HTTP interface to retrieve the TableInfo directly if HTTP port is available
 	// use parser for downstream.
 	parser2, err := dbconn.GetParserForConn(tctx, s.ddlDBConn)
@@ -919,6 +951,9 @@ func (s *Syncer) getDBInfoFromDownstream(tctx *tcontext.Context, sourceTable, ta
 
 // trackTableInfoFromDownstream tries to track the table info from the downstream. It will not overwrite existing table.
 func (s *Syncer) trackTableInfoFromDownstream(tctx *tcontext.Context, sourceTable, targetTable *filter.Table) error {
+	if s.cfg != nil && s.cfg.Blackhole {
+		return errors.Errorf("local schema missing for %s; include its CREATE TABLE in schema-files or the binlog range", sourceTable)
+	}
 	// TODO: Switch to use the HTTP interface to retrieve the TableInfo directly if HTTP port is available
 	// use parser for downstream.
 	parser2, err := dbconn.GetParserForConn(tctx, s.ddlDBConn)
@@ -1013,6 +1048,9 @@ func (s *Syncer) updateReplicationJobTS(job *job, jobIdx int) {
 }
 
 func (s *Syncer) updateReplicationLagMetric() {
+	if s.cfg.LocalBinlog != nil {
+		return
+	} // historical timestamps are not live replication lag
 	var lag int64
 	var minTS int64
 
@@ -1544,19 +1582,21 @@ func (s *Syncer) syncDDL(queueBucket string, db *dbconn.DBConn, ddlJobChan chan 
 
 			var affected int
 			var ddlCreateTime int64 = -1 // default when scan failed
-			row, err2 := db.QuerySQL(s.syncCtx, s.metricsProxies, "SELECT UNIX_TIMESTAMP()")
-			if err2 != nil {
-				s.tctx.L().Warn("selecting unix timestamp failed", zap.Error(err2))
-			} else {
-				for row.Next() {
-					err2 = row.Scan(&ddlCreateTime)
-					if err2 != nil {
-						s.tctx.L().Warn("getting ddlCreateTime failed", zap.Error(err2))
+			if s.blackhole == nil {
+				row, err2 := db.QuerySQL(s.syncCtx, s.metricsProxies, "SELECT UNIX_TIMESTAMP()")
+				if err2 != nil {
+					s.tctx.L().Warn("selecting unix timestamp failed", zap.Error(err2))
+				} else {
+					for row.Next() {
+						err2 = row.Scan(&ddlCreateTime)
+						if err2 != nil {
+							s.tctx.L().Warn("getting ddlCreateTime failed", zap.Error(err2))
+						}
 					}
+					//nolint:sqlclosecheck
+					_ = row.Close()
+					_ = row.Err()
 				}
-				//nolint:sqlclosecheck
-				_ = row.Close()
-				_ = row.Err()
 			}
 			affected, err = db.ExecuteSQLWithIgnore(s.syncCtx, s.metricsProxies, errorutil.IsIgnorableMySQLDDLError, ddlJob.ddls)
 			failpoint.Inject("TestHandleSpecialDDLError", func() {
@@ -1786,6 +1826,9 @@ func (s *Syncer) updateLagCronJob(ctx context.Context) {
 }
 
 func (s *Syncer) updateTSOffset(ctx context.Context) error {
+	if s.cfg.LocalBinlog != nil {
+		return nil
+	}
 	t1 := time.Now()
 	ts, tsErr := s.fromDB.GetServerUnixTS(ctx)
 	rtt := time.Since(t1).Seconds()
@@ -1921,6 +1964,15 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 		return terror.ErrSchemaTrackerInit.Delegate(err)
 	}
 
+	if s.cfg.Blackhole {
+		s.schemaTracker.UseSourceSchemaForDownstream()
+		if !s.localSchemaLoaded {
+			if err = s.loadLocalSchema(ctx); err != nil {
+				return err
+			}
+			s.localSchemaLoaded = true
+		}
+	}
 	if freshAndAllMode {
 		err = s.loadTableStructureFromDump(ctx)
 		if err != nil {
@@ -2239,6 +2291,18 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 			}
 		})
 		switch {
+		case err == binlogstream.ErrArchiveComplete:
+			if lastTxnEndLocation.Position.Compare(s.cfg.LocalBinlog.EndPosition()) != 0 {
+				return errors.Errorf("local binlog end %s is not a transaction boundary (last transaction %s)", s.cfg.LocalBinlog.EndPosition(), lastTxnEndLocation.Position)
+			}
+			if err = s.flushJobs(); err != nil {
+				return err
+			}
+			if err = s.execError.Load(); err != nil {
+				return err
+			}
+			s.tctx.L().Info("local binlog replay completed", zap.Stringer("end", lastTxnEndLocation.Position), zap.Any("dataSQL", s.blackhole.Stats()), zap.Any("checkpointSQL", s.checkpoint.(*RemoteCheckPoint).blackhole.Stats()))
+			return nil
 		case err == context.Canceled:
 			s.tctx.L().Info("binlog replication main routine quit(context canceled)!", zap.Stringer("last location", lastTxnEndLocation))
 			return nil
@@ -3218,6 +3282,26 @@ func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 }
 
 func (s *Syncer) createDBs(ctx context.Context) error {
+	if s.cfg.LocalBinlog != nil {
+		s.SourceTableNamesFlavor = conn.LowerCaseTableNamesFlavor(s.cfg.LocalBinlog.LowerCaseTableNames)
+		if s.cfg.To.Session == nil {
+			s.cfg.To.Session = make(map[string]string)
+		}
+		s.cfg.To.Session["sql_mode"] = s.cfg.LocalBinlog.SQLMode
+		var err error
+		s.toDB, s.toDBConns, err = dbconn.CreateBlackholeConns(s.tctx, s.cfg, s.blackhole, s.cfg.WorkerCount)
+		if err != nil {
+			return err
+		}
+		var ddlConns []*dbconn.DBConn
+		s.ddlDB, ddlConns, err = dbconn.CreateBlackholeConns(s.tctx, s.cfg, s.blackhole, 2)
+		if err != nil {
+			dbconn.CloseBaseDB(s.tctx, s.toDB)
+			return err
+		}
+		s.ddlDBConn, s.downstreamTrackConn = ddlConns[0], ddlConns[1]
+		return nil
+	}
 	var err error
 	dbCfg := s.cfg.From
 	dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(maxDMLConnectionTimeout)
@@ -3446,6 +3530,9 @@ func (s *Syncer) Resume(ctx context.Context, pr chan pb.ProcessResult) {
 // 2. only balist, route/filter rules, syncerConfig and metric labels can be updated at this moment.
 // 3. some config fields from sourceCfg also can be updated, see more in func `copyConfigFromSource`.
 func (s *Syncer) CheckCanUpdateCfg(newCfg *config.SubTaskConfig) error {
+	if s.cfg.Blackhole || newCfg.Blackhole || s.cfg.LocalBinlog != nil || newCfg.LocalBinlog != nil {
+		return errors.New("recreate local-binlog/blackhole tasks to change configuration")
+	}
 	s.RLock()
 	defer s.RUnlock()
 	if err := config.CheckForeignKeyChecksSyncerOptions(newCfg.To.Session, newCfg.SyncerConfig); err != nil {
@@ -3512,6 +3599,9 @@ func (s *Syncer) CheckCanUpdateCfg(newCfg *config.SubTaskConfig) error {
 // now, only support to update config for routes, filters, column-mappings, block-allow-list
 // now no config diff implemented, so simply re-init use new config.
 func (s *Syncer) Update(ctx context.Context, cfg *config.SubTaskConfig) (err error) {
+	if s.cfg.Blackhole || cfg.Blackhole || s.cfg.LocalBinlog != nil || cfg.LocalBinlog != nil {
+		return errors.New("recreate local-binlog/blackhole tasks to change configuration")
+	}
 	s.Lock()
 	defer s.Unlock()
 	if err := config.CheckForeignKeyChecksSyncerOptions(cfg.To.Session, cfg.SyncerConfig); err != nil {

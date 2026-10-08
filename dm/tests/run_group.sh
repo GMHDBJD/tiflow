@@ -27,7 +27,7 @@ groups=(
 	# G04
 	"import_goroutine_leak incremental_mode initial_unit drop_column_with_index duplicate_event expression_filter extend_column fake_rotate_event"
 	# G05
-	"load_interrupt many_tables online_ddl foreign_key full_mode gbk gtid ha_cases http_proxies"
+	"local_binlog_blackhole load_interrupt many_tables online_ddl foreign_key full_mode gbk gtid ha_cases http_proxies"
 	# G06
 	"relay_interrupt safe_mode safe_mode_foreign_key foreign_key_multi_worker foreign_key_route_single_worker foreign_key_route_multi_worker foreign_key_schema_repair sequence_safe_mode lightning_load_task lightning_mode metrics"
 	# G07

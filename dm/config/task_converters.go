@@ -45,6 +45,7 @@ func TaskConfigToSubTaskConfigs(c *TaskConfig, sources map[string]dbconfig.DBCon
 		}
 
 		cfg := NewSubTaskConfig()
+		cfg.Blackhole = c.Blackhole
 		cfg.IsSharding = c.IsSharding
 		cfg.ShardMode = c.ShardMode
 		cfg.StrictOptimisticShardMode = c.StrictOptimisticShardMode
@@ -70,11 +71,13 @@ func TaskConfigToSubTaskConfigs(c *TaskConfig, sources map[string]dbconfig.DBCon
 			return nil, terror.ErrConfigMySQLInstNotFound
 		}
 		cfg.From = *fromClone
-		toClone := c.TargetDB.Clone()
-		if toClone == nil {
-			return nil, terror.ErrConfigNeedTargetDB
+		if !c.Blackhole {
+			toClone := c.TargetDB.Clone()
+			if toClone == nil {
+				return nil, terror.ErrConfigNeedTargetDB
+			}
+			cfg.To = *toClone
 		}
-		cfg.To = *toClone
 
 		cfg.SourceID = inst.SourceID
 
@@ -408,6 +411,10 @@ func SubTaskConfigsToTaskConfig(stCfgs ...*SubTaskConfig) *TaskConfig {
 	c.Timezone = stCfg0.Timezone
 	c.CaseSensitive = stCfg0.CaseSensitive
 	c.TargetDB = &stCfg0.To // just ref
+	c.Blackhole = stCfg0.Blackhole
+	if c.Blackhole {
+		c.TargetDB = nil
+	}
 	c.OnlineDDL = stCfg0.OnlineDDL
 	c.OnlineDDLScheme = stCfg0.OnlineDDLScheme
 	c.CleanDumpFile = stCfg0.CleanDumpFile

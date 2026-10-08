@@ -18,6 +18,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"os"
@@ -67,8 +68,9 @@ type PurgeConfig struct {
 
 // SourceConfig is the configuration for source.
 type SourceConfig struct {
-	Enable     bool `yaml:"enable" toml:"enable" json:"enable"`
-	EnableGTID bool `yaml:"enable-gtid" toml:"enable-gtid" json:"enable-gtid"`
+	LocalBinlog *LocalBinlogConfig `yaml:"local-binlog,omitempty" toml:"local-binlog,omitempty" json:"local-binlog,omitempty"`
+	Enable      bool               `yaml:"enable" toml:"enable" json:"enable"`
+	EnableGTID  bool               `yaml:"enable-gtid" toml:"enable-gtid" json:"enable-gtid"`
 	// deprecated
 	AutoFixGTID bool   `yaml:"auto-fix-gtid" toml:"auto-fix-gtid" json:"auto-fix-gtid"`
 	RelayDir    string `yaml:"relay-dir" toml:"relay-dir" json:"relay-dir"`
@@ -133,6 +135,11 @@ func newSourceConfig() *SourceConfig {
 func (c *SourceConfig) Clone() *SourceConfig {
 	clone := &SourceConfig{}
 	*clone = *c
+	if c.LocalBinlog != nil {
+		local := *c.LocalBinlog
+		local.SchemaFiles = append([]string(nil), local.SchemaFiles...)
+		clone.LocalBinlog = &local
+	}
 	return clone
 }
 
@@ -236,6 +243,14 @@ func (c *SourceConfig) Verify() error {
 		return terror.ErrWorkerTooLongSourceID.Generate(c.SourceID, MaxSourceIDLength)
 	}
 
+	if c.LocalBinlog != nil {
+		if err := c.LocalBinlog.Verify(); err != nil {
+			return err
+		}
+		if c.EnableGTID || c.EnableRelay || (c.Flavor != "" && c.Flavor != "mysql") {
+			return fmt.Errorf("local-binlog requires mysql flavor with enable-gtid and enable-relay disabled")
+		}
+	}
 	var err error
 	if len(c.RelayBinLogName) > 0 {
 		if !utils.VerifyFilename(c.RelayBinLogName) {
@@ -403,6 +418,7 @@ func (c *SourceConfig) YamlForDowngrade() (string, error) {
 // This config is used for downgrade(config export) from a higher dmctl version.
 // When we add any new config item into SourceConfig, we should update it also.
 type SourceConfigForDowngrade struct {
+	LocalBinlog     *LocalBinlogConfig     `yaml:"local-binlog,omitempty"`
 	Enable          bool                   `yaml:"enable,omitempty"`
 	EnableGTID      bool                   `yaml:"enable-gtid"`
 	RelayDir        string                 `yaml:"relay-dir"`
@@ -426,6 +442,7 @@ type SourceConfigForDowngrade struct {
 // NewSourceConfigForDowngrade creates a new base config for downgrade.
 func NewSourceConfigForDowngrade(sourceCfg *SourceConfig) *SourceConfigForDowngrade {
 	return &SourceConfigForDowngrade{
+		LocalBinlog:     sourceCfg.LocalBinlog,
 		Enable:          sourceCfg.Enable,
 		EnableGTID:      sourceCfg.EnableGTID,
 		RelayDir:        sourceCfg.RelayDir,

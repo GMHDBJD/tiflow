@@ -32,6 +32,7 @@ import (
 
 // DMLWorker is used to sync dml.
 type DMLWorker struct {
+	blackhole     bool
 	compact       bool
 	batch         int
 	workerCount   int
@@ -122,6 +123,7 @@ func dmlWorkerWrap(inCh chan *job, syncer *Syncer) chan *job {
 		syncCtx:                 syncer.syncCtx, // this ctx can be used to cancel all the workers
 		metricProxies:           syncer.metricsProxies,
 		toDBConns:               syncer.toDBConns,
+		blackhole:               syncer.cfg.Blackhole,
 		foreignKeyChecksEnabled: config.IsForeignKeyChecksEnabled(syncer.cfg.To.Session),
 		inCh:                    inCh,
 		flushCh:                 make(chan *job),
@@ -259,7 +261,6 @@ func (w *DMLWorker) executeBatchJobs(queueID int, jobs []*job, disableForeignKey
 		affect  int
 		queries []string
 		args    [][]interface{}
-		db      = w.toDBConns[queueID]
 		err     error
 		dmls    = make([]*sqlmodel.RowChange, 0, len(jobs))
 	)
@@ -340,7 +341,7 @@ func (w *DMLWorker) executeBatchJobs(queueID int, jobs []*job, disableForeignKey
 	// if users need to quit this asap, we can support pause-task/stop-task --force in the future
 	ctx, cancel := w.syncCtx.WithTimeout(maxDMLConnectionDuration)
 	defer cancel()
-	affect, err = db.ExecuteSQL(ctx, w.metricProxies, queries, args...)
+	affect, err = w.toDBConns[queueID].ExecuteSQL(ctx, w.metricProxies, queries, args...)
 	failpoint.Inject("SafeModeExit", func(val failpoint.Value) {
 		if intVal, ok := val.(int); ok && intVal == 4 && len(jobs) > 0 {
 			w.logger.Warn("fail to exec DML", zap.String("failpoint", "SafeModeExit"))
@@ -355,7 +356,7 @@ func (w *DMLWorker) executeBatchJobs(queueID int, jobs []*job, disableForeignKey
 		}
 	})
 
-	if w.judgeKeyNotFound(affect, jobs) {
+	if !w.blackhole && w.judgeKeyNotFound(affect, jobs) {
 		// throw an error if needed in the future.
 		// err = terror.ErrDBExecuteFailed.Delegate(errors.New("key not found"), "mock")
 		w.logger.Warn("no matching record is found to update/delete, ER_KEY_NOT_FOUND", zap.Int("affect", affect), zap.Int("jobs", len(jobs)), zap.Stringer("start from", jobs[0].startLocation), zap.Stringer("end at", jobs[len(jobs)-1].currentLocation))
