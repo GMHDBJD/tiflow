@@ -531,6 +531,8 @@ func defaultValidatorConfig() ValidatorConfig {
 
 // TaskConfig is the configuration for Task.
 type TaskConfig struct {
+	hasReplaySource bool // populated when reconstructing an exported task from subtasks
+
 	Blackhole     bool `yaml:"blackhole,omitempty" toml:"blackhole,omitempty" json:"blackhole,omitempty"`
 	*flag.FlagSet `yaml:"-" toml:"-" json:"-"`
 
@@ -1128,7 +1130,7 @@ func checkValidExpr(expr string) error {
 func (c *TaskConfig) YamlForDowngrade() (string, error) {
 	// Offline mode cannot run on older binaries. Preserve explicit false values
 	// (notably online-ddl) rather than applying old-version default omission.
-	if c.Blackhole {
+	if c.Blackhole || c.hasReplaySource {
 		data, err := yaml.Marshal(c)
 		return string(data), err
 	}

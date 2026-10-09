@@ -155,4 +155,15 @@ func TestRemoteReplayConfigRoundTrip(t *testing.T) {
 	require.Equal(t, "/tmp/schema.sql", source.BinlogReplay.SchemaFiles[0])
 	source.EnableRelay = true
 	require.Error(t, source.Verify())
+	// A real target must not lose online-ddl=false in compatibility export.
+	c.Blackhole = false
+	task := SubTaskConfigsToTaskConfig(c)
+	exported, err := task.YamlForDowngrade()
+	require.NoError(t, err)
+	require.Contains(t, exported, "online-ddl: false")
+	restored := NewTaskConfig()
+	require.NoError(t, restored.FromYaml(exported))
+	require.False(t, restored.OnlineDDL)
+	require.False(t, restored.Blackhole)
+
 }

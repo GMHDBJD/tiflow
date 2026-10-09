@@ -412,6 +412,9 @@ func SubTaskConfigsToTaskConfig(stCfgs ...*SubTaskConfig) *TaskConfig {
 	c.CaseSensitive = stCfg0.CaseSensitive
 	c.TargetDB = &stCfg0.To // just ref
 	c.Blackhole = stCfg0.Blackhole
+	for _, stCfg := range stCfgs {
+		c.hasReplaySource = c.hasReplaySource || stCfg.LocalBinlog != nil || stCfg.BinlogReplay != nil
+	}
 	if c.Blackhole {
 		c.TargetDB = nil
 	}
