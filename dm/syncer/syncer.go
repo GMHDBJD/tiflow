@@ -409,7 +409,7 @@ func (s *Syncer) Init(ctx context.Context) (err error) {
 	if err := config.CheckForeignKeyChecksSyncerOptions(s.cfg.To.Session, s.cfg.SyncerConfig); err != nil {
 		return err
 	}
-	if err := s.cfg.VerifyLocalBinlog(); err != nil {
+	if err := s.cfg.VerifySyncerMode(); err != nil {
 		return err
 	}
 	if s.cfg.LocalBinlog != nil {
@@ -419,7 +419,7 @@ func (s *Syncer) Init(ctx context.Context) (err error) {
 		}
 		s.upstreamTZStr = s.cfg.LocalBinlog.Timezone
 		s.timezone = s.upstreamTZ
-		if s.cfg.Timezone != "" {
+		if !s.cfg.Blackhole || s.cfg.Timezone != "" {
 			s.timezone, _, err = str2TimezoneOrFromDB(tctx, s.cfg.Timezone, conn.DownstreamDBConfig(&s.cfg.To))
 			if err != nil {
 				return err
@@ -430,11 +430,13 @@ func (s *Syncer) Init(ctx context.Context) (err error) {
 		if err != nil {
 			return err
 		}
-		s.timezone, _, err = str2TimezoneOrFromDB(tctx, s.cfg.Timezone, conn.DownstreamDBConfig(&s.cfg.To))
-		if err != nil {
-			return err
+		s.timezone = s.upstreamTZ
+		if !s.cfg.Blackhole || s.cfg.Timezone != "" {
+			s.timezone, _, err = str2TimezoneOrFromDB(tctx, s.cfg.Timezone, conn.DownstreamDBConfig(&s.cfg.To))
+			if err != nil {
+				return err
+			}
 		}
-
 	}
 	s.baList, err = filter.New(s.cfg.CaseSensitive, s.cfg.BAList)
 	if err != nil {
@@ -842,7 +844,7 @@ func (s *Syncer) Process(ctx context.Context, pr chan pb.ProcessResult) {
 	}()
 
 	err := s.Run(newCtx)
-	if err != nil || s.cfg.LocalBinlog != nil {
+	if err != nil || s.cfg.ReplayEnd() != nil {
 		// returned error or finite archive completion
 		// cancel goroutines created in s.Run
 		cancel()
@@ -1966,12 +1968,14 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 
 	if s.cfg.Blackhole {
 		s.schemaTracker.UseSourceSchemaForDownstream()
-		if !s.localSchemaLoaded {
-			if err = s.loadLocalSchema(ctx); err != nil {
-				return err
-			}
-			s.localSchemaLoaded = true
+	}
+	// Only a fresh checkpoint may import the initial schema. A resumed database
+	// target must use its checkpointed, potentially evolved table definitions.
+	if fresh && !s.localSchemaLoaded && len(s.cfg.ReplaySchemaFiles()) > 0 {
+		if err = s.loadLocalSchema(ctx); err != nil {
+			return err
 		}
+		s.localSchemaLoaded = true
 	}
 	if freshAndAllMode {
 		err = s.loadTableStructureFromDump(ctx)
@@ -2013,7 +2017,8 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 	)
 	s.tctx.L().Info("replicate binlog from checkpoint", zap.Stringer("checkpoint", lastTxnEndLocation))
 
-	if s.streamerController.IsClosed() {
+	replayEnd := s.cfg.ReplayEnd()
+	if s.streamerController.IsClosed() && (replayEnd == nil || lastTxnEndLocation.Position.Compare(*replayEnd) < 0) {
 		err = s.streamerController.Start(s.runCtx, lastTxnEndLocation)
 		if err != nil {
 			return terror.Annotate(err, "fail to restart streamer controller")
@@ -2265,6 +2270,9 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 			}
 		}
 
+		if replayEnd != nil && endLocation.Position.Compare(*replayEnd) >= 0 {
+			return s.finishBinlogReplay(lastTxnEndLocation.Position, *replayEnd)
+		}
 		startTime := time.Now()
 		e, op, err := s.streamerController.GetEvent(s.runCtx)
 
@@ -2292,17 +2300,7 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 		})
 		switch {
 		case err == binlogstream.ErrArchiveComplete:
-			if lastTxnEndLocation.Position.Compare(s.cfg.LocalBinlog.EndPosition()) != 0 {
-				return errors.Errorf("local binlog end %s is not a transaction boundary (last transaction %s)", s.cfg.LocalBinlog.EndPosition(), lastTxnEndLocation.Position)
-			}
-			if err = s.flushJobs(); err != nil {
-				return err
-			}
-			if err = s.execError.Load(); err != nil {
-				return err
-			}
-			s.tctx.L().Info("local binlog replay completed", zap.Stringer("end", lastTxnEndLocation.Position), zap.Any("dataSQL", s.blackhole.Stats()), zap.Any("checkpointSQL", s.checkpoint.(*RemoteCheckPoint).blackhole.Stats()))
-			return nil
+			return s.finishBinlogReplay(lastTxnEndLocation.Position, *replayEnd)
 		case err == context.Canceled:
 			s.tctx.L().Info("binlog replication main routine quit(context canceled)!", zap.Stringer("last location", lastTxnEndLocation))
 			return nil
@@ -2379,6 +2377,9 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 		startLocation := s.streamerController.GetCurStartLocation()
 		endLocation = s.streamerController.GetCurEndLocation()
 		lastTxnEndLocation = s.streamerController.GetTxnEndLocation()
+		if replayEnd != nil && endLocation.Position.Compare(*replayEnd) > 0 {
+			return errors.Errorf("binlog replay end %s splits an event ending at %s", *replayEnd, endLocation.Position)
+		}
 
 		if _, ok := e.Event.(*replication.GenericEvent); !ok {
 			lastEvent = e
@@ -3281,14 +3282,65 @@ func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 	return firstErr
 }
 
-func (s *Syncer) createDBs(ctx context.Context) error {
+func (s *Syncer) createDBs(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			s.closeDBs()
+		}
+	}()
 	if s.cfg.LocalBinlog != nil {
 		s.SourceTableNamesFlavor = conn.LowerCaseTableNamesFlavor(s.cfg.LocalBinlog.LowerCaseTableNames)
 		if s.cfg.To.Session == nil {
 			s.cfg.To.Session = make(map[string]string)
 		}
-		s.cfg.To.Session["sql_mode"] = s.cfg.LocalBinlog.SQLMode
-		var err error
+		if _, ok := s.cfg.To.Session["sql_mode"]; !ok {
+			s.cfg.To.Session["sql_mode"] = s.cfg.LocalBinlog.SQLMode
+		}
+	} else {
+		dbCfg := s.cfg.From
+		dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(maxDMLConnectionTimeout)
+		fromDB, fromConns, err := dbconn.CreateConns(s.tctx, s.cfg, conn.UpstreamDBConfig(&dbCfg), 1, s.cfg.DumpIOTotalBytes, s.cfg.DumpUUID)
+		if err != nil {
+			return err
+		}
+		s.fromDB = &dbconn.UpStreamConn{BaseDB: fromDB}
+		s.fromConn = fromConns[0]
+		baseConn, err := s.fromDB.BaseDB.GetBaseConn(ctx)
+		if err != nil {
+			return err
+		}
+		lcFlavor, err := conn.FetchLowerCaseTableNamesSetting(ctx, baseConn)
+		if err != nil {
+			return err
+		}
+		s.SourceTableNamesFlavor = lcFlavor
+
+		hasSQLMode := false
+		// get sql_mode from upstream db
+		if s.cfg.To.Session == nil {
+			s.cfg.To.Session = make(map[string]string)
+		} else {
+			for k := range s.cfg.To.Session {
+				if strings.ToLower(k) == "sql_mode" {
+					hasSQLMode = true
+					break
+				}
+			}
+		}
+		if !hasSQLMode {
+			sqlMode, err2 := conn.GetGlobalVariable(tcontext.NewContext(ctx, log.L()), s.fromDB.BaseDB, "sql_mode")
+			if err2 != nil {
+				s.tctx.L().Warn("cannot get sql_mode from upstream database, the sql_mode will be assigned \"IGNORE_SPACE, NO_AUTO_VALUE_ON_ZERO, ALLOW_INVALID_DATES\"", log.ShortError(err2))
+			}
+			sqlModes, err3 := conn.AdjustSQLModeCompatible(sqlMode)
+			if err3 != nil {
+				s.tctx.L().Warn("cannot adjust sql_mode compatible, the sql_mode will be assigned  stay the same", log.ShortError(err3))
+			}
+			s.cfg.To.Session["sql_mode"] = sqlModes
+		}
+
+	}
+	if s.cfg.Blackhole {
 		s.toDB, s.toDBConns, err = dbconn.CreateBlackholeConns(s.tctx, s.cfg, s.blackhole, s.cfg.WorkerCount)
 		if err != nil {
 			return err
@@ -3296,56 +3348,13 @@ func (s *Syncer) createDBs(ctx context.Context) error {
 		var ddlConns []*dbconn.DBConn
 		s.ddlDB, ddlConns, err = dbconn.CreateBlackholeConns(s.tctx, s.cfg, s.blackhole, 2)
 		if err != nil {
-			dbconn.CloseBaseDB(s.tctx, s.toDB)
 			return err
 		}
 		s.ddlDBConn, s.downstreamTrackConn = ddlConns[0], ddlConns[1]
 		return nil
 	}
-	var err error
-	dbCfg := s.cfg.From
-	dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(maxDMLConnectionTimeout)
-	fromDB, fromConns, err := dbconn.CreateConns(s.tctx, s.cfg, conn.UpstreamDBConfig(&dbCfg), 1, s.cfg.DumpIOTotalBytes, s.cfg.DumpUUID)
-	if err != nil {
-		return err
-	}
-	s.fromDB = &dbconn.UpStreamConn{BaseDB: fromDB}
-	s.fromConn = fromConns[0]
-	baseConn, err := s.fromDB.BaseDB.GetBaseConn(ctx)
-	if err != nil {
-		return err
-	}
-	lcFlavor, err := conn.FetchLowerCaseTableNamesSetting(ctx, baseConn)
-	if err != nil {
-		return err
-	}
-	s.SourceTableNamesFlavor = lcFlavor
 
-	hasSQLMode := false
-	// get sql_mode from upstream db
-	if s.cfg.To.Session == nil {
-		s.cfg.To.Session = make(map[string]string)
-	} else {
-		for k := range s.cfg.To.Session {
-			if strings.ToLower(k) == "sql_mode" {
-				hasSQLMode = true
-				break
-			}
-		}
-	}
-	if !hasSQLMode {
-		sqlMode, err2 := conn.GetGlobalVariable(tcontext.NewContext(ctx, log.L()), s.fromDB.BaseDB, "sql_mode")
-		if err2 != nil {
-			s.tctx.L().Warn("cannot get sql_mode from upstream database, the sql_mode will be assigned \"IGNORE_SPACE, NO_AUTO_VALUE_ON_ZERO, ALLOW_INVALID_DATES\"", log.ShortError(err2))
-		}
-		sqlModes, err3 := conn.AdjustSQLModeCompatible(sqlMode)
-		if err3 != nil {
-			s.tctx.L().Warn("cannot adjust sql_mode compatible, the sql_mode will be assigned  stay the same", log.ShortError(err3))
-		}
-		s.cfg.To.Session["sql_mode"] = sqlModes
-	}
-
-	dbCfg = s.cfg.To
+	dbCfg := s.cfg.To
 	dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().
 		SetReadTimeout(maxDMLConnectionTimeout).
 		SetMaxIdleConns(s.cfg.WorkerCount)
@@ -3368,7 +3377,9 @@ func (s *Syncer) createDBs(ctx context.Context) error {
 	}
 	s.ddlDBConn = ddlDBConns[0]
 	s.downstreamTrackConn = ddlDBConns[1]
-	printServerVersion(s.tctx, s.fromDB.BaseDB, "upstream")
+	if s.fromDB != nil {
+		printServerVersion(s.tctx, s.fromDB.BaseDB, "upstream")
+	}
 	printServerVersion(s.tctx, s.toDB, "downstream")
 
 	return nil
@@ -3530,7 +3541,7 @@ func (s *Syncer) Resume(ctx context.Context, pr chan pb.ProcessResult) {
 // 2. only balist, route/filter rules, syncerConfig and metric labels can be updated at this moment.
 // 3. some config fields from sourceCfg also can be updated, see more in func `copyConfigFromSource`.
 func (s *Syncer) CheckCanUpdateCfg(newCfg *config.SubTaskConfig) error {
-	if s.cfg.Blackhole || newCfg.Blackhole || s.cfg.LocalBinlog != nil || newCfg.LocalBinlog != nil {
+	if s.cfg.Blackhole || newCfg.Blackhole || s.cfg.LocalBinlog != nil || newCfg.LocalBinlog != nil || s.cfg.BinlogReplay != nil || newCfg.BinlogReplay != nil {
 		return errors.New("recreate local-binlog/blackhole tasks to change configuration")
 	}
 	s.RLock()
@@ -3599,7 +3610,7 @@ func (s *Syncer) CheckCanUpdateCfg(newCfg *config.SubTaskConfig) error {
 // now, only support to update config for routes, filters, column-mappings, block-allow-list
 // now no config diff implemented, so simply re-init use new config.
 func (s *Syncer) Update(ctx context.Context, cfg *config.SubTaskConfig) (err error) {
-	if s.cfg.Blackhole || cfg.Blackhole || s.cfg.LocalBinlog != nil || cfg.LocalBinlog != nil {
+	if s.cfg.Blackhole || cfg.Blackhole || s.cfg.LocalBinlog != nil || cfg.LocalBinlog != nil || s.cfg.BinlogReplay != nil || cfg.BinlogReplay != nil {
 		return errors.New("recreate local-binlog/blackhole tasks to change configuration")
 	}
 	s.Lock()

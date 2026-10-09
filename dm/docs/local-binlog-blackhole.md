@@ -1,9 +1,10 @@
-# Offline incremental replay with a blackhole target
+# Configurable binlog replay and blackhole output
 
-This opt-in mode measures DM's incremental processing work without an upstream
-MySQL connection or downstream database execution. It uses normal DM master,
-worker, source and task commands; there is no separate benchmark runtime.
-**It discards all output and is not a replication/backup target.**
+Input transport and output target are independent. A source can read immutable
+local binlogs or use DM's native remote MySQL reader. A task can write to a real
+TiDB target or explicitly discard database execution with `blackhole: true`.
+Normal DM master, worker, source and task commands are used in every case.
+**Blackhole discards all output and is not a replication/backup target.**
 
 ## Execution boundary
 
@@ -24,7 +25,7 @@ This does not simulate MySQL driver protocol encoding, server execution, affecte
 rows, constraints, network latency or failures. Affected-row diagnostics are
 inapplicable. Database metadata queries are not given fabricated responses: they
 are replaced by explicit offline metadata or fail. DDL's downstream clock lookup
-(for database-specific error recovery) is skipped. Source status reports the
+(for database-specific error recovery) is skipped. For local input, source status reports the
 configured archive end, not a live server position. Archive replay does not
 report historical event timestamps as live replication lag.
 
@@ -46,13 +47,21 @@ report historical event timestamps as live replication lag.
   Files and directory contents must not be changed during a run. Treat the
   archive and schema paths as trusted input, not a sandbox.
 
-The initial implementation requires the local source and blackhole target
-**together**, incremental mode, no sharding, no relay, no GTID positioning, no
-online DDL, no validator, and no strict downstream collation discovery.
-Task `start-time` and in-place task updates are unsupported; recreate the task to
-change inputs or settings. A real `target-database` is rejected, not ignored.
-Old binaries do not understand these options; offline tasks cannot be downgraded.
-Normal database-backed tasks keep their existing behavior.
+Local input, finite replay, and blackhole currently support incremental mode,
+no sharding, no relay, no GTID positioning, no online DDL and no validator.
+Local input also cannot discover strict downstream collation metadata.
+An explicit filename/position start is required. In-place task updates are
+unsupported; recreate the task to change input, replay or output settings.
+Finite replay does not accept `start-time`. A blackhole task rejects an additional
+`target-database` instead of silently discarding its configuration.
+Old binaries do not understand these options. Normal live database-backed tasks
+without these options retain their existing behavior.
+
+For a **real target**, prepare the corresponding initial target schema and seed
+rows before replaying UPDATE/DELETE workloads, just as for ordinary incremental
+replication. Initial `schema-files` initialize DM's schema tracker; they do not
+create or populate the real target. The real target's own schema/index discovery,
+SQL execution and persistent checkpoints remain enabled.
 
 ## Configuration and commands
 
@@ -103,15 +112,67 @@ dmctl --master-addr 127.0.0.1:8261 start-task task.yaml
 dmctl --master-addr 127.0.0.1:8261 query-status offline-replay
 ```
 
-`check-task` validates the offline configuration on the master, not the contents
-of worker-local files. Missing/invalid files fail on the worker. At the exact
-end, DM drains the job queues and flushes checkpoints before reporting Finished.
-`binlogType` is `archive`. There is no remote fallback on file/read errors.
+`check-task` validates configuration and applicable checks on each real endpoint:
+remote source version, binlog settings, replication privilege and start position;
+real target privilege. It honors `ignore-checking-items`. Cross-database schema
+compatibility checks are not performed for replay/blackhole: today's source
+schema need not match the historical initial schema. Worker-local archive/schema
+contents are checked on the worker. The check result states these limits.
+
+At the exact transaction-boundary end, DM drains job queues and flushes
+checkpoints before reporting Finished. It does not wait for remote EOF or a new
+event beyond the endpoint. Splitting an event/transaction is an error. Local
+`binlogType` is `archive`, with no remote fallback on file/read errors.
 
 Pause/resume in the **same Syncer instance** retains saved/flushed state and schema.
-There is no persistent checkpoint: restarting the worker, failover or recreating
-the task starts from configured meta. Use a recreated task for independent runs;
+With blackhole there is no persistent checkpoint: restarting the worker, failover
+or recreating the task starts from configured meta. A real target retains normal
+persistent checkpoints and restores checkpointed schema instead of overwriting
+it with the original schema files. Use a recreated task for independent runs;
 do not interpret a resume at EOF as a fresh benchmark.
+
+## Native remote input
+
+Keep the task above (including `blackhole: true`), but replace the source with:
+
+```yaml
+source-id: local-source  # must match mysql-instances[].source-id
+flavor: mysql
+enable-gtid: false
+enable-relay: false
+from:
+  host: 127.0.0.1
+  port: 3306
+  user: dm_replay
+  password: ""  # supply the test server's credentials securely
+binlog-replay:
+  schema-files: [/data/dm-benchmark/scene/schema.sql]
+  end:
+    binlog-name: mysql-bin.000005
+    binlog-pos: 800000000
+```
+
+`binlog-replay` supplies finite-range/schema metadata; it does not select a reader
+or an output. Do not specify it together with `local-binlog`, which already
+contains this metadata. Without `local-binlog`, DM opens the real upstream
+metadata connection and uses its existing remote StreamerController,
+BinlogSyncer, MySQL packet reads, parser, checksum verification and event queue.
+Timezone, SQL mode and table-name case settings are discovered from the upstream.
+`binlogType` is `remote`. Supplying the same buffer/queue defaults to an archive
+reader is not a substitute for this path.
+
+The existing MySQL instance must still own/register the requested binlogs. Do not
+merely copy archive files into an arbitrary live MySQL datadir or execute them
+back into tables. Prefer the preserved generator instance and its original log
+index. Stop workload generation during measurement and record the exact start
+and end from the corpus manifest. The remote reader may prefetch beyond the end;
+Syncer never applies events past it.
+
+To use a real target with either input, omit `blackhole` and provide an ordinary
+`target-database`. With no local input and no finite `binlog-replay`, blackhole
+can also consume a live remote stream; provide schema-creating DDL in its stream
+if no initial schema is supplied. Blackhole never guesses historical schema from
+the upstream's current tables.
 
 ## Measurements and evidence
 
@@ -131,7 +192,7 @@ Do not interpret an archive-only rate as a production remote-reader limit.
 The queue is bounded by event count, not bytes; wide rows or large events can
 increase retained memory substantially. Record memory as well as throughput.
 
-The completion log includes separate `dataSQL` and `checkpointSQL` counters:
+With blackhole, the completion log includes separate `dataSQL` and `checkpointSQL` counters:
 submitted statements/parameters, commits and rollbacks. These are not source-row
 or source-transaction counts. Legacy query-status `totalRows` also includes some
 control jobs; use the workload manifest for source row counts. Driver timings are
@@ -142,3 +203,9 @@ settings when comparing revisions. The sample disables initial safe mode to make
 runs explicit; that is a benchmark choice, not the normal task default. A run
 shorter than the checkpoint interval does not exercise periodic flush costs;
 use longer runs when measuring those costs.
+
+A local-versus-remote comparison must use the same logical workload, schema,
+transaction size, DM binary/settings, full warmups and repeated runs. Record
+MySQL's CPU/I/O, network placement and TLS as well as DM resources. A same-host
+loopback TCP result exercises the native remote client but does **not** emulate
+cloud network latency, TLS, a busy MySQL instance or a production capacity limit.

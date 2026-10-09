@@ -1701,7 +1701,7 @@ func (s *Server) generateSubTask(
 	if cfg.TaskMode == config.ModeIncrement && (cliArgs == nil || cliArgs.StartTime == "") {
 		for _, inst := range cfg.MySQLInstances {
 			if inst.Meta == nil {
-				if cfg.Blackhole {
+				if cfg.Blackhole || sourceCfgs[inst.SourceID].LocalBinlog != nil || sourceCfgs[inst.SourceID].BinlogReplay != nil {
 					return nil, nil, fmt.Errorf("blackhole requires explicit meta for source %s", inst.SourceID)
 				}
 				sourceCfg := sourceCfgs[inst.SourceID]
@@ -1722,13 +1722,17 @@ func (s *Server) generateSubTask(
 	for _, stCfg := range stCfgs {
 		sourceCfg := sourceCfgs[stCfg.SourceID]
 		stCfg.LocalBinlog = sourceCfg.LocalBinlog
-		if stCfg.LocalBinlog != nil {
+		stCfg.BinlogReplay = sourceCfg.BinlogReplay
+		if stCfg.LocalBinlog != nil || stCfg.BinlogReplay != nil || stCfg.Blackhole {
 			stCfg.Flavor = sourceCfg.Flavor
 			stCfg.EnableGTID = sourceCfg.EnableGTID
 			stCfg.UseRelay = sourceCfg.EnableRelay
 			stCfg.CaseSensitive = sourceCfg.CaseSensitive
 		}
-		if err := stCfg.VerifyLocalBinlog(); err != nil {
+		if cliArgs != nil && cliArgs.StartTime != "" && stCfg.ReplayEnd() != nil {
+			return nil, nil, fmt.Errorf("binlog replay requires explicit meta; start-time is unsupported")
+		}
+		if err := stCfg.VerifySyncerMode(); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1759,6 +1763,7 @@ func (s *Server) generateSubTasksForCheck(stCfgs []*config.SubTaskConfig) ([]*co
 		stCfgsForCheck = append(stCfgsForCheck, stCfgForCheck)
 		if sourceCfg, ok := sourceCfgs[stCfgForCheck.SourceID]; ok {
 			stCfgsForCheck[i].LocalBinlog = sourceCfg.LocalBinlog
+			stCfgsForCheck[i].BinlogReplay = sourceCfg.BinlogReplay
 			stCfgsForCheck[i].Flavor = sourceCfg.Flavor
 			stCfgsForCheck[i].ServerID = sourceCfg.ServerID
 			stCfgsForCheck[i].EnableGTID = sourceCfg.EnableGTID

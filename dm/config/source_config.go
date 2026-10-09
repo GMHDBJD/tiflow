@@ -68,9 +68,10 @@ type PurgeConfig struct {
 
 // SourceConfig is the configuration for source.
 type SourceConfig struct {
-	LocalBinlog *LocalBinlogConfig `yaml:"local-binlog,omitempty" toml:"local-binlog,omitempty" json:"local-binlog,omitempty"`
-	Enable      bool               `yaml:"enable" toml:"enable" json:"enable"`
-	EnableGTID  bool               `yaml:"enable-gtid" toml:"enable-gtid" json:"enable-gtid"`
+	BinlogReplay *BinlogReplayConfig `yaml:"binlog-replay,omitempty" toml:"binlog-replay,omitempty" json:"binlog-replay,omitempty"`
+	LocalBinlog  *LocalBinlogConfig  `yaml:"local-binlog,omitempty" toml:"local-binlog,omitempty" json:"local-binlog,omitempty"`
+	Enable       bool                `yaml:"enable" toml:"enable" json:"enable"`
+	EnableGTID   bool                `yaml:"enable-gtid" toml:"enable-gtid" json:"enable-gtid"`
 	// deprecated
 	AutoFixGTID bool   `yaml:"auto-fix-gtid" toml:"auto-fix-gtid" json:"auto-fix-gtid"`
 	RelayDir    string `yaml:"relay-dir" toml:"relay-dir" json:"relay-dir"`
@@ -139,6 +140,11 @@ func (c *SourceConfig) Clone() *SourceConfig {
 		local := *c.LocalBinlog
 		local.SchemaFiles = append([]string(nil), local.SchemaFiles...)
 		clone.LocalBinlog = &local
+	}
+	if c.BinlogReplay != nil {
+		replay := *c.BinlogReplay
+		replay.SchemaFiles = append([]string(nil), replay.SchemaFiles...)
+		clone.BinlogReplay = &replay
 	}
 	return clone
 }
@@ -251,6 +257,17 @@ func (c *SourceConfig) Verify() error {
 			return fmt.Errorf("local-binlog requires mysql flavor with enable-gtid and enable-relay disabled")
 		}
 	}
+	if c.BinlogReplay != nil {
+		if c.LocalBinlog != nil {
+			return fmt.Errorf("local-binlog and binlog-replay cannot both specify replay metadata")
+		}
+		if err := c.BinlogReplay.Verify(); err != nil {
+			return err
+		}
+		if c.EnableGTID || c.EnableRelay || (c.Flavor != "" && c.Flavor != "mysql") {
+			return fmt.Errorf("binlog-replay requires MySQL position replication without relay")
+		}
+	}
 	var err error
 	if len(c.RelayBinLogName) > 0 {
 		if !utils.VerifyFilename(c.RelayBinLogName) {
@@ -284,6 +301,11 @@ func (c *SourceConfig) GetDecryptedClone() *SourceConfig {
 		pswdFrom = utils.DecryptOrPlaintext(clone.From.Password)
 	}
 	clone.From.Password = pswdFrom
+	if c.BinlogReplay != nil {
+		replay := *c.BinlogReplay
+		replay.SchemaFiles = append([]string(nil), replay.SchemaFiles...)
+		clone.BinlogReplay = &replay
+	}
 	return clone
 }
 
@@ -418,6 +440,7 @@ func (c *SourceConfig) YamlForDowngrade() (string, error) {
 // This config is used for downgrade(config export) from a higher dmctl version.
 // When we add any new config item into SourceConfig, we should update it also.
 type SourceConfigForDowngrade struct {
+	BinlogReplay    *BinlogReplayConfig    `yaml:"binlog-replay,omitempty"`
 	LocalBinlog     *LocalBinlogConfig     `yaml:"local-binlog,omitempty"`
 	Enable          bool                   `yaml:"enable,omitempty"`
 	EnableGTID      bool                   `yaml:"enable-gtid"`
@@ -443,6 +466,7 @@ type SourceConfigForDowngrade struct {
 func NewSourceConfigForDowngrade(sourceCfg *SourceConfig) *SourceConfigForDowngrade {
 	return &SourceConfigForDowngrade{
 		LocalBinlog:     sourceCfg.LocalBinlog,
+		BinlogReplay:    sourceCfg.BinlogReplay,
 		Enable:          sourceCfg.Enable,
 		EnableGTID:      sourceCfg.EnableGTID,
 		RelayDir:        sourceCfg.RelayDir,

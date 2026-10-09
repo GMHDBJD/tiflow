@@ -392,8 +392,8 @@ func (w *SourceWorker) updateSourceStatus(ctx context.Context, needLock bool, al
 //   - when DM-worker Server watches a UpstreamRelayWorkerKeyAdapter change
 //   - when DM-worker Server fails watching and recovers from a snapshot
 func (w *SourceWorker) EnableRelay(startBySourceCfg bool) (err error) {
-	if w.cfg.LocalBinlog != nil {
-		return fmt.Errorf("relay cannot be enabled for local-binlog")
+	if w.cfg.LocalBinlog != nil || w.cfg.BinlogReplay != nil {
+		return fmt.Errorf("relay cannot be enabled for binlog replay")
 	}
 	w.l.Info("enter EnableRelay")
 	w.Lock()
@@ -1156,6 +1156,7 @@ func (w *SourceWorker) OperateSchema(ctx context.Context, req *pb.OperateWorkerS
 func copyConfigFromSource(cfg *config.SubTaskConfig, sourceCfg *config.SourceConfig, enableRelay bool) error {
 	cfg.From = sourceCfg.From
 	cfg.LocalBinlog = sourceCfg.LocalBinlog
+	cfg.BinlogReplay = sourceCfg.BinlogReplay
 
 	cfg.Flavor = sourceCfg.Flavor
 	cfg.ServerID = sourceCfg.ServerID
@@ -1183,7 +1184,7 @@ func copyConfigFromSource(cfg *config.SubTaskConfig, sourceCfg *config.SourceCon
 		}
 		cfg.FilterRules = append(cfg.FilterRules, filterRule)
 	}
-	return cfg.VerifyLocalBinlog()
+	return cfg.VerifySyncerMode()
 }
 
 // copyConfigFromSourceForEach do copyConfigFromSource for each value in subTaskCfgM and change subTaskCfgM in-place.

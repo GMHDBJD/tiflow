@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 PingCAP, Inc. Licensed under the Apache License, Version 2.0.
-"""Normal cluster lifecycle test, with no upstream/downstream database dependency."""
+"""Normal lifecycle test: archive input or an optional real MySQL 8.0 source."""
 import argparse
 import base64
 import hashlib
@@ -22,7 +22,14 @@ def main():
     parser.add_argument("--master-port", type=int, default=8261)
     parser.add_argument("--worker-port", type=int, default=8262)
     parser.add_argument("--peer-port", type=int, default=8291)
+    parser.add_argument("--remote-host", help="Test native remote input against a disposable MySQL 8.0 server")
+    parser.add_argument("--mysql-port", type=int, default=3306)
+    parser.add_argument("--mysql-user", default="root")
+    parser.add_argument("--mysql-password-env", default="MYSQL_PWD")
+    parser.add_argument("--mysql-command", help="Administrative mysql CLI command connected to that same server")
     args = parser.parse_args()
+    if args.remote_host and not args.mysql_command:
+        parser.error("--remote-host requires --mysql-command")
     root = args.work_dir.resolve()
     root.mkdir(parents=True, exist_ok=False)
     bindir = args.bin_dir.resolve()
@@ -65,6 +72,55 @@ syncers:
     batch: 100
     safe-mode-duration: 0s
 """)
+    binlog_type = "archive"
+    if args.remote_host:
+        def sql(statement):
+            cmd = shlex.split(args.mysql_command) + ["--batch", "--raw", "--skip-column-names"]
+            result = subprocess.run(cmd, input=statement, text=True, capture_output=True, timeout=40)
+            if result.returncode:
+                raise RuntimeError(result.stderr)
+            return result.stdout.strip()
+
+        binlog_type = "remote"
+        database = f"dm_remote_fixture_{os.getpid()}"
+        schema = (f"CREATE DATABASE `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin; "
+                  f"USE `{database}`; CREATE TABLE t(id INT PRIMARY KEY,k INT);")
+        sql(schema)  # No IF NOT EXISTS: never overwrite an existing database.
+        schema_path = root / "initial-schema.sql"
+        schema_path.write_text(schema)
+        start = sql("SHOW MASTER STATUS;").split("\t")
+        sql(f"USE `{database}`; INSERT INTO t VALUES (1,1),(2,2); "
+            "UPDATE t SET k=3 WHERE id=1; DELETE FROM t WHERE id=2; "
+            "ALTER TABLE t ADD COLUMN c INT NOT NULL DEFAULT 7; INSERT INTO t VALUES (3,3,7);")
+        end = sql("SHOW MASTER STATUS;").split("\t")
+        if start[0] != end[0]:
+            raise RuntimeError("fixture crossed a file; use a larger max_binlog_size")
+        old_manifest = manifest
+        manifest = {"filename": end[0], "start": int(start[1]), "end": int(end[1])}
+        (root / "remote-manifest.json").write_text(json.dumps(manifest, indent=2))
+        password = os.environ.get(args.mysql_password_env, "")
+        source.write_text(f'''source-id: local-source
+flavor: mysql
+enable-gtid: false
+enable-relay: false
+from:
+  host: {json.dumps(args.remote_host)}
+  port: {args.mysql_port}
+  user: {json.dumps(args.mysql_user)}
+  password: {json.dumps(password)}
+binlog-replay:
+  schema-files: [{json.dumps(str(schema_path))}]
+  end:
+    binlog-name: {end[0]}
+    binlog-pos: {end[1]}
+''')
+        text = task.read_text().replace("binlog-name: " + old_manifest["filename"], "binlog-name: " + start[0])
+        text = text.replace("binlog-pos: " + str(old_manifest["start"]), "binlog-pos: " + start[1])
+        text = text.replace("    syncer-config-name: replay", "    syncer-config-name: replay\n    block-allow-list: fixture-only")
+        text += f"\nblock-allow-list:\n  fixture-only:\n    do-dbs: [{database}]\n"
+        task.write_text(text)
+    source.chmod(0o600)
+    task.chmod(0o600)
     processes = []
     sequence = 0
 
@@ -154,7 +210,7 @@ syncers:
                 for task in tasks:
                     sync = task["sync"]
                     expected = f"({manifest['filename']}, {manifest['end']})"
-                    if sync["syncerBinlog"] != expected or sync["binlogType"] != "archive":
+                    if sync["syncerBinlog"] != expected or sync["binlogType"] != binlog_type:
                         raise RuntimeError(f"unexpected completion: {sync}")
                 (root / "result.json").write_text(json.dumps(status, indent=2))
                 break

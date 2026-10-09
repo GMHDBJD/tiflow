@@ -34,13 +34,11 @@ func localConfigForTest() *SubTaskConfig {
 }
 
 func TestLocalBinlogConfig(t *testing.T) {
-	require.NoError(t, localConfigForTest().VerifyLocalBinlog())
+	require.NoError(t, localConfigForTest().VerifySyncerMode())
 	for _, tc := range []struct {
 		name   string
 		mutate func(*SubTaskConfig)
 	}{
-		{"not blackhole", func(c *SubTaskConfig) { c.Blackhole = false }},
-		{"not local", func(c *SubTaskConfig) { c.LocalBinlog = nil }},
 		{"full", func(c *SubTaskConfig) { c.Mode = ModeAll }},
 		{"sharding", func(c *SubTaskConfig) { c.ShardMode = ShardOptimistic }},
 		{"online ddl", func(c *SubTaskConfig) { c.OnlineDDL = true }},
@@ -55,7 +53,7 @@ func TestLocalBinlogConfig(t *testing.T) {
 		{"traversal", func(c *SubTaskConfig) { c.LocalBinlog.End.BinLogName = "../mysql-bin.000002" }},
 		{"empty range", func(c *SubTaskConfig) { c.Meta = &c.LocalBinlog.End }},
 	} {
-		t.Run(tc.name, func(t *testing.T) { c := localConfigForTest(); tc.mutate(c); require.Error(t, c.VerifyLocalBinlog()) })
+		t.Run(tc.name, func(t *testing.T) { c := localConfigForTest(); tc.mutate(c); require.Error(t, c.VerifySyncerMode()) })
 	}
 }
 
@@ -105,4 +103,56 @@ mysql-instances:
 	normal := NewTaskConfig()
 	require.False(t, normal.Blackhole)
 	require.Error(t, normal.Adjust()) // normal mode still requires target config
+}
+
+// Input transport must not imply the output target, or vice versa.
+func TestIndependentInputAndOutput(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		for _, blackhole := range []bool{false, true} {
+			c := localConfigForTest()
+			c.Blackhole = blackhole
+			if !local {
+				c.LocalBinlog = nil
+			}
+			require.NoError(t, c.VerifySyncerMode())
+		}
+	}
+	c := localConfigForTest()
+	c.BinlogReplay = &BinlogReplayConfig{SchemaFiles: c.LocalBinlog.SchemaFiles, End: c.LocalBinlog.End}
+	require.Error(t, c.VerifySyncerMode()) // never silently choose between endpoints
+	c.LocalBinlog = nil
+	require.NoError(t, c.VerifySyncerMode())
+	require.Equal(t, "mysql-bin.000002", c.ReplayEnd().Name)
+	require.Equal(t, []string{"/tmp/schema.sql"}, c.ReplaySchemaFiles())
+	c.Blackhole = false
+	require.NoError(t, c.VerifySyncerMode())
+	c.BinlogReplay.End.BinLogPos = 3
+	require.Error(t, c.VerifySyncerMode())
+	c.BinlogReplay.End.BinLogPos = 100
+	c.BinlogReplay.SchemaFiles = []string{"relative.sql"}
+	require.Error(t, c.VerifySyncerMode())
+}
+
+func TestRemoteReplayConfigRoundTrip(t *testing.T) {
+	c := localConfigForTest()
+	c.BinlogReplay = &BinlogReplayConfig{SchemaFiles: c.LocalBinlog.SchemaFiles, End: c.LocalBinlog.End}
+	c.LocalBinlog = nil
+	encoded, err := c.Toml()
+	require.NoError(t, err)
+	decoded := NewSubTaskConfig()
+	require.NoError(t, decoded.Decode(encoded, false))
+	require.Equal(t, c.BinlogReplay, decoded.BinlogReplay)
+	source := NewSourceConfig()
+	source.SourceID = c.SourceID
+	source.BinlogReplay = c.BinlogReplay
+	encoded, err = source.YamlForDowngrade()
+	require.NoError(t, err)
+	copy, err := SourceCfgFromYamlAndVerify(encoded)
+	require.NoError(t, err)
+	require.Equal(t, source.BinlogReplay, copy.BinlogReplay)
+	clone := source.Clone()
+	clone.BinlogReplay.SchemaFiles[0] = "/changed.sql"
+	require.Equal(t, "/tmp/schema.sql", source.BinlogReplay.SchemaFiles[0])
+	source.EnableRelay = true
+	require.Error(t, source.Verify())
 }

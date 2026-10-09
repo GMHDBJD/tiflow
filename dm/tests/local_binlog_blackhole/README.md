@@ -24,3 +24,25 @@ The release bin directory must contain `dm-master`, `dm-worker`, and `dmctl`
 (or `dm-ctl`). `--test-binaries` uses the `.test` binaries and writes coverage.
 All spawned processes are scoped to this case and cleaned up; logs, configurations
 and every dmctl response remain in the work directory, including on failure.
+
+To exercise the **native remote reader**, point the same test at a disposable
+MySQL 8.0 server with ROW/FULL binlogs and replication privileges:
+
+```sh
+python3 dm/tests/local_binlog_blackhole/check.py --bin-dir /path/to/bin \
+  --work-dir /tmp/remote-binlog-check --remote-host 127.0.0.1 \
+  --mysql-port 3306 --mysql-user root \
+  --mysql-command 'mysql --protocol=tcp -h127.0.0.1 -P3306 -uroot'
+```
+
+The administrative client command must connect to the same server. It can also
+be `docker exec -i CONTAINER mysql -uroot`. `MYSQL_PWD` (or the environment variable
+named by `--mysql-password-env`) supplies the DM source password; do not put
+passwords in command-line arguments. Generated source/task files have mode 0600;
+treat the work directory as private and redact credentials before sharing it.
+
+The remote case creates a uniquely named fixture database without overwriting
+existing databases, records positions around INSERT/UPDATE/DELETE and an ALTER
+TABLE, and checks `binlogType: remote` and Finished at the exact transaction end.
+It leaves the small fixture database for inspection; use disposable test servers.
+No binlogs are reset or purged. This is still a lifecycle test, not a benchmark.

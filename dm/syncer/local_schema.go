@@ -31,14 +31,14 @@ import (
 // resetting changed tables to their initial definitions.
 func (s *Syncer) loadLocalSchema(ctx context.Context) error {
 	p := parser.New()
-	mode, err := mysql.GetSQLMode(s.cfg.LocalBinlog.SQLMode)
+	mode, err := mysql.GetSQLMode(s.cfg.To.Session["sql_mode"])
 	if err != nil {
 		return err
 	}
 	p.SetSQLMode(mode)
 	var tables []*filter.Table
 	var infos []*model.TableInfo
-	for _, path := range s.cfg.LocalBinlog.SchemaFiles {
+	for _, path := range s.cfg.ReplaySchemaFiles() {
 		contents, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("read local schema %s: %w", path, err)

@@ -24,8 +24,8 @@ import (
 )
 
 // LocalBinlogConfig describes an immutable, finite MySQL binlog archive.
-// Paths are resolved on the worker, not on the master. This source is only
-// usable with an explicitly selected blackhole target.
+// Paths are resolved on the worker, not on the master. The target is selected
+// independently: a real database or an explicitly enabled blackhole.
 type LocalBinlogConfig struct {
 	Directory           string   `yaml:"directory" toml:"directory" json:"directory"`
 	SchemaFiles         []string `yaml:"schema-files" toml:"schema-files" json:"schema-files"`
@@ -68,44 +68,101 @@ func (c *LocalBinlogConfig) EndPosition() mysql.Position {
 	return mysql.Position{Name: c.End.BinLogName, Pos: c.End.BinLogPos}
 }
 
-// VerifyLocalBinlog checks the source/target pair after source settings have
-// been copied into a subtask. Keep this check on both master and worker.
-func (c *SubTaskConfig) VerifyLocalBinlog() error {
-	if c.LocalBinlog == nil && !c.Blackhole {
+// BinlogReplayConfig bounds a replication run independently of its input and output.
+// SchemaFiles describe the schema at the task's start position, not today's
+// upstream schema. Paths are resolved on the worker.
+type BinlogReplayConfig struct {
+	SchemaFiles []string `yaml:"schema-files,omitempty" toml:"schema-files,omitempty" json:"schema-files,omitempty"`
+	End         Meta     `yaml:"end" toml:"end" json:"end"`
+}
+
+// Verify checks a finite replay's portable metadata.
+func (c *BinlogReplayConfig) Verify() error {
+	for _, path := range c.SchemaFiles {
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("binlog-replay.schema-files must contain absolute paths")
+		}
+	}
+	return verifyReplayPosition(&c.End)
+}
+
+func verifyReplayPosition(m *Meta) error {
+	if m == nil || !utils.VerifyFilename(m.BinLogName) || filepath.Base(m.BinLogName) != m.BinLogName || m.BinLogPos < 4 || m.BinLogGTID != "" {
+		return fmt.Errorf("binlog replay requires an explicit filename/position >= 4, without GTID")
+	}
+	return nil
+}
+
+// ReplayEnd returns the exclusive finite endpoint, or nil for live replication.
+func (c *SubTaskConfig) ReplayEnd() *mysql.Position {
+	if c.LocalBinlog != nil {
+		p := c.LocalBinlog.EndPosition()
+		return &p
+	}
+	if c.BinlogReplay != nil {
+		return &mysql.Position{Name: c.BinlogReplay.End.BinLogName, Pos: c.BinlogReplay.End.BinLogPos}
+	}
+	return nil
+}
+
+// ReplaySchemaFiles returns initial schema declarations for either transport.
+func (c *SubTaskConfig) ReplaySchemaFiles() []string {
+	if c.LocalBinlog != nil {
+		return c.LocalBinlog.SchemaFiles
+	}
+	if c.BinlogReplay != nil {
+		return c.BinlogReplay.SchemaFiles
+	}
+	return nil
+}
+
+// VerifySyncerMode checks opt-in input, replay and output settings after source
+// configuration is copied into a subtask. Neither transport implies blackhole.
+func (c *SubTaskConfig) VerifySyncerMode() error {
+	if c.LocalBinlog == nil && c.BinlogReplay == nil && !c.Blackhole {
 		return nil
 	}
-	if c.LocalBinlog == nil || !c.Blackhole {
-		return fmt.Errorf("local-binlog and blackhole must be enabled together")
+	if c.Mode != ModeIncrement || c.ShardMode != "" || c.IsSharding || c.OnlineDDL || c.ValidatorCfg.Mode != ValidationNone {
+		return fmt.Errorf("binlog replay and blackhole require incremental, non-sharded replication without online DDL or validator")
 	}
-	if err := c.LocalBinlog.Verify(); err != nil {
+	if c.LocalBinlog != nil && c.BinlogReplay != nil {
+		return fmt.Errorf("specify replay metadata in either local-binlog or binlog-replay, not both")
+	}
+	if c.LocalBinlog != nil {
+		if err := c.LocalBinlog.Verify(); err != nil {
+			return err
+		}
+		if c.CollationCompatible == StrictCollationCompatible {
+			return fmt.Errorf("local-binlog does not support strict collation discovery")
+		}
+	}
+	if c.BinlogReplay != nil {
+		if err := c.BinlogReplay.Verify(); err != nil {
+			return err
+		}
+	}
+	if err := verifyReplayPosition(c.Meta); err != nil {
 		return err
 	}
-	if c.Mode != ModeIncrement || c.ShardMode != "" || c.IsSharding || c.OnlineDDL || c.EnableGTID || c.UseRelay || c.ValidatorCfg.Mode != ValidationNone {
-		return fmt.Errorf("local-binlog requires incremental, non-sharded replication without online DDL, GTID positioning, relay or validator")
+	if c.EnableGTID || c.UseRelay || (c.Flavor != "" && c.Flavor != "mysql") {
+		return fmt.Errorf("binlog replay and blackhole currently require MySQL filename/position replication without relay")
 	}
-	if c.CollationCompatible == StrictCollationCompatible {
-		return fmt.Errorf("local-binlog does not support strict collation discovery")
-	}
-	if c.Meta == nil || !utils.VerifyFilename(c.Meta.BinLogName) || filepath.Base(c.Meta.BinLogName) != c.Meta.BinLogName || c.Meta.BinLogPos < 4 || c.Meta.BinLogGTID != "" {
-		return fmt.Errorf("local-binlog requires an explicit start filename/position in meta")
-	}
-	start := mysql.Position{Name: c.Meta.BinLogName, Pos: c.Meta.BinLogPos}
-	startFile, err := utils.ParseFilename(start.Name)
-	if err != nil {
-		return err
-	}
-	endFile, err := utils.ParseFilename(c.LocalBinlog.End.BinLogName)
-	if err != nil {
-		return err
-	}
-	if startFile.BaseName != endFile.BaseName {
-		return fmt.Errorf("local-binlog start and end must use the same filename prefix")
-	}
-	if c.Flavor != "" && c.Flavor != "mysql" {
-		return fmt.Errorf("local-binlog supports MySQL archives only")
-	}
-	if start.Compare(c.LocalBinlog.EndPosition()) >= 0 {
-		return fmt.Errorf("local-binlog start must precede end")
+	if end := c.ReplayEnd(); end != nil {
+		start := mysql.Position{Name: c.Meta.BinLogName, Pos: c.Meta.BinLogPos}
+		startFile, err := utils.ParseFilename(start.Name)
+		if err != nil {
+			return err
+		}
+		endFile, err := utils.ParseFilename(end.Name)
+		if err != nil {
+			return err
+		}
+		if startFile.BaseName != endFile.BaseName {
+			return fmt.Errorf("binlog replay start and end must use the same filename prefix")
+		}
+		if start.Compare(*end) >= 0 {
+			return fmt.Errorf("binlog replay start must precede end")
+		}
 	}
 	return nil
 }
