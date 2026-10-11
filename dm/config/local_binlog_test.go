@@ -174,7 +174,6 @@ func TestRemoteReplayConfigRoundTrip(t *testing.T) {
 	require.NoError(t, restored.FromYaml(exported))
 	require.False(t, restored.OnlineDDL)
 	require.False(t, restored.Blackhole)
-
 }
 
 func TestBlackholeLatencyConfigValidation(t *testing.T) {
@@ -183,8 +182,12 @@ func TestBlackholeLatencyConfigValidation(t *testing.T) {
 		latency time.Duration
 		valid   bool
 	}{
-		{false, 0, true}, {true, 0, true}, {true, time.Millisecond, true},
-		{false, time.Millisecond, false}, {false, -time.Millisecond, false}, {true, -time.Millisecond, false},
+		{false, 0, true},
+		{true, 0, true},
+		{true, time.Millisecond, true},
+		{false, time.Millisecond, false},
+		{false, -time.Millisecond, false},
+		{true, -time.Millisecond, false},
 	} {
 		c := localConfigForTest()
 		c.Blackhole = tc.enabled

@@ -1104,8 +1104,8 @@ func TestTaskConfigForDowngrade(t *testing.T) {
 	// make sure all new field were added
 	cfgReflect := reflect.Indirect(reflect.ValueOf(cfg))
 	cfgForDowngradeReflect := reflect.Indirect(reflect.ValueOf(cfgForDowngrade))
-	// without flag, collation_compatible, experimental, validator
-	require.Equal(t, cfgForDowngradeReflect.NumField()+4, cfgReflect.NumField())
+	// without hasReplaySource, flag, collation_compatible, experimental, validator
+	require.Equal(t, cfgForDowngradeReflect.NumField()+5, cfgReflect.NumField())
 
 	// make sure all field were copied
 	cfgForClone := &TaskConfigForDowngrade{}

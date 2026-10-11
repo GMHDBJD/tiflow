@@ -177,6 +177,7 @@ func (t *blackholeTx) Commit() error {
 	t.conn.sink.commits.Add(1)
 	return nil
 }
+
 func (t *blackholeTx) Rollback() error {
 	t.conn.inTransaction = false
 	t.conn.sink.rollbacks.Add(1)
