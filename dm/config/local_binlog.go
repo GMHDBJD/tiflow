@@ -118,7 +118,20 @@ func (c *SubTaskConfig) ReplaySchemaFiles() []string {
 
 // VerifySyncerMode checks opt-in input, replay and output settings after source
 // configuration is copied into a subtask. Neither transport implies blackhole.
+func verifyBlackholeLatency(enabled bool, latency Duration) error {
+	if latency.Duration < 0 {
+		return fmt.Errorf("blackhole-latency must be nonnegative")
+	}
+	if !enabled && latency.Duration != 0 {
+		return fmt.Errorf("blackhole-latency requires blackhole: true")
+	}
+	return nil
+}
+
 func (c *SubTaskConfig) VerifySyncerMode() error {
+	if err := verifyBlackholeLatency(c.Blackhole, c.BlackholeLatency); err != nil {
+		return err
+	}
 	if c.LocalBinlog == nil && c.BinlogReplay == nil && !c.Blackhole {
 		return nil
 	}

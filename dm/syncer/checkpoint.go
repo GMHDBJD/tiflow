@@ -399,7 +399,7 @@ func NewRemoteCheckPoint(
 	}
 
 	if cfg.Blackhole {
-		cp.blackhole = &conn.Blackhole{}
+		cp.blackhole = conn.NewBlackhole(cfg.BlackholeLatency.Duration)
 	}
 	return cp
 }

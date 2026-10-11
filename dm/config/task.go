@@ -533,8 +533,9 @@ func defaultValidatorConfig() ValidatorConfig {
 type TaskConfig struct {
 	hasReplaySource bool // populated when reconstructing an exported task from subtasks
 
-	Blackhole     bool `yaml:"blackhole,omitempty" toml:"blackhole,omitempty" json:"blackhole,omitempty"`
-	*flag.FlagSet `yaml:"-" toml:"-" json:"-"`
+	Blackhole        bool     `yaml:"blackhole,omitempty" toml:"blackhole,omitempty" json:"blackhole,omitempty"`
+	BlackholeLatency Duration `yaml:"blackhole-latency,omitempty" toml:"blackhole-latency,omitempty" json:"blackhole-latency,omitempty"`
+	*flag.FlagSet    `yaml:"-" toml:"-" json:"-"`
 
 	Name                      string `yaml:"name" toml:"name" json:"name"`
 	TaskMode                  string `yaml:"task-mode" toml:"task-mode" json:"task-mode"`
@@ -749,6 +750,9 @@ func (c *TaskConfig) adjust() error {
 		log.L().Warn("'online-ddl-scheme' will be deprecated soon. Recommend that use online-ddl instead of online-ddl-scheme.")
 	}
 
+	if err := verifyBlackholeLatency(c.Blackhole, c.BlackholeLatency); err != nil {
+		return err
+	}
 	if c.Blackhole {
 		if c.TaskMode != ModeIncrement || c.IsSharding || c.ShardMode != "" || c.OnlineDDL {
 			return fmt.Errorf("blackhole requires incremental, non-sharded replication without online DDL")
@@ -1275,6 +1279,7 @@ func (c *SyncerConfigForDowngrade) omitDefaultVals() {
 // When we add any new config item into SourceConfig, we should update it also.
 type TaskConfigForDowngrade struct {
 	Blackhole               bool                                 `yaml:"blackhole,omitempty"`
+	BlackholeLatency        Duration                             `yaml:"blackhole-latency,omitempty"`
 	Name                    string                               `yaml:"name"`
 	MetricLabels            map[string]string                    `yaml:"metric-labels,omitempty"`
 	TaskMode                string                               `yaml:"task-mode"`
@@ -1332,6 +1337,7 @@ func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
 		CaseSensitive:             taskConfig.CaseSensitive,
 		TargetDB:                  targetDB,
 		Blackhole:                 taskConfig.Blackhole,
+		BlackholeLatency:          taskConfig.BlackholeLatency,
 		OnlineDDLScheme:           taskConfig.OnlineDDLScheme,
 		Routes:                    taskConfig.Routes,
 		Filters:                   taskConfig.Filters,

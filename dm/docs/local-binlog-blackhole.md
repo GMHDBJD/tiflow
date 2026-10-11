@@ -22,12 +22,37 @@ written before the global checkpoint. Only the SQL driver discards the writes,
 including checkpoint schema/table creation, updates and deletes.
 
 This does not simulate MySQL driver protocol encoding, server execution, affected
-rows, constraints, network latency or failures. Affected-row diagnostics are
+rows, constraints, network protocols or failures. By default, it adds no execution latency. Affected-row diagnostics are
 inapplicable. Database metadata queries are not given fabricated responses: they
 are replaced by explicit offline metadata or fail. DDL's downstream clock lookup
 (for database-specific error recovery) is skipped. For local input, source status reports the
 configured archive end, not a live server position. Archive replay does not
 report historical event timestamps as live replication lag.
+
+## Optional downstream latency
+
+Set `blackhole-latency: 5ms` alongside `blackhole: true` in the **task** config
+(default `0s`, nonnegative). The normal config export and master-to-worker path
+preserve it. Recreate the task to change it; it is rejected with a real target.
+
+The driver waits **once at commit per downstream execution transaction**, after
+all statements have been submitted, or once for an autocommit statement. It does
+not sleep once per row, once per source transaction, or once per statement inside
+a batch. DML, DDL and checkpoint connections use the same setting. Connections
+wait independently, and task cancellation interrupts waits; rollback adds no
+latency. All DM batching, barriers, SQL construction, serialization and periodic
+checkpoint work stay enabled. Actual waits can exceed the setting due to timer
+scheduling; completion statistics include `DelayCount` and `DelayNanoseconds`
+(the latter sums actual wait duration across connections, including canceled
+waits, not elapsed wall time).
+
+This is a **fixed batch acknowledgement latency model**, not a network emulator
+or a real database. It does not model per-statement protocol round trips, jitter,
+locks, rate limits, commit durability or latency growth with payload/concurrency.
+For independent, full batches a useful optimistic estimate is
+`workers * actual statements per batch / latency`; dependent jobs, underfilled
+batches and pipeline costs can make throughput lower. Never interpret it as a
+real downstream capacity claim.
 
 ## Input contract
 

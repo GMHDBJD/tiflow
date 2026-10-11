@@ -81,9 +81,10 @@ func GetDBConfigForTest() dbconfig.DBConfig {
 
 // SubTaskConfig is the configuration for SubTask.
 type SubTaskConfig struct {
-	BinlogReplay *BinlogReplayConfig `toml:"binlog-replay,omitempty" json:"binlog-replay,omitempty"`
-	LocalBinlog  *LocalBinlogConfig  `toml:"local-binlog,omitempty" json:"local-binlog,omitempty"`
-	Blackhole    bool                `toml:"blackhole,omitempty" json:"blackhole,omitempty"`
+	BinlogReplay     *BinlogReplayConfig `toml:"binlog-replay,omitempty" json:"binlog-replay,omitempty"`
+	LocalBinlog      *LocalBinlogConfig  `toml:"local-binlog,omitempty" json:"local-binlog,omitempty"`
+	Blackhole        bool                `toml:"blackhole,omitempty" json:"blackhole,omitempty"`
+	BlackholeLatency Duration            `toml:"blackhole-latency,omitempty" json:"blackhole-latency,omitempty"`
 	// BurntSushi/toml seems have a bug for flag "-"
 	// when doing encoding, if we use `toml:"-"`, it still try to encode it
 	// and it will panic because of unsupported type (reflect.Func)

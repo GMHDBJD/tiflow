@@ -15,6 +15,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/stretchr/testify/require"
@@ -59,12 +60,14 @@ func TestLocalBinlogConfig(t *testing.T) {
 
 func TestLocalBinlogConfigRoundTrip(t *testing.T) {
 	c := localConfigForTest()
+	c.BlackholeLatency = Duration{Duration: 5 * time.Millisecond}
 	encoded, err := c.Toml()
 	require.NoError(t, err)
 	decoded := NewSubTaskConfig()
 	require.NoError(t, decoded.Decode(encoded, false))
 	require.Equal(t, c.LocalBinlog, decoded.LocalBinlog)
 	require.True(t, decoded.Blackhole)
+	require.Equal(t, c.BlackholeLatency, decoded.BlackholeLatency)
 	source := NewSourceConfig()
 	source.SourceID = c.SourceID
 	source.LocalBinlog = c.LocalBinlog
@@ -83,6 +86,7 @@ func TestBlackholeTaskConfigExport(t *testing.T) {
 	require.NoError(t, c.FromYaml(`name: replay
 task-mode: incremental
 blackhole: true
+blackhole-latency: 5ms
 online-ddl: false
 mysql-instances:
    - source-id: local
@@ -95,6 +99,11 @@ mysql-instances:
 	d := NewTaskConfig()
 	require.NoError(t, d.FromYaml(exported))
 	require.True(t, d.Blackhole)
+	require.Equal(t, 5*time.Millisecond, d.BlackholeLatency.Duration)
+	subtasks, err := TaskConfigToSubTaskConfigs(c, map[string]dbconfig.DBConfig{"local": {Host: "127.0.0.1"}})
+	require.NoError(t, err)
+	require.Equal(t, c.BlackholeLatency, subtasks[0].BlackholeLatency)
+	require.Equal(t, c.BlackholeLatency, SubTaskConfigsToTaskConfig(subtasks...).BlackholeLatency)
 	require.Nil(t, d.TargetDB)
 	require.True(t, NewTaskConfigForDowngrade(c).Blackhole)
 	// Opt-in target is never inferred and cannot silently discard a real target.
@@ -166,4 +175,32 @@ func TestRemoteReplayConfigRoundTrip(t *testing.T) {
 	require.False(t, restored.OnlineDDL)
 	require.False(t, restored.Blackhole)
 
+}
+
+func TestBlackholeLatencyConfigValidation(t *testing.T) {
+	for _, tc := range []struct {
+		enabled bool
+		latency time.Duration
+		valid   bool
+	}{
+		{false, 0, true}, {true, 0, true}, {true, time.Millisecond, true},
+		{false, time.Millisecond, false}, {false, -time.Millisecond, false}, {true, -time.Millisecond, false},
+	} {
+		c := localConfigForTest()
+		c.Blackhole = tc.enabled
+		c.BlackholeLatency = Duration{Duration: tc.latency}
+		err := c.VerifySyncerMode()
+		if tc.valid {
+			require.NoError(t, err)
+		} else {
+			require.Error(t, err)
+		}
+		task := SubTaskConfigsToTaskConfig(c)
+		err = task.Adjust()
+		if tc.valid {
+			require.NoError(t, err)
+		} else {
+			require.Error(t, err)
+		}
+	}
 }

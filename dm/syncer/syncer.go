@@ -308,7 +308,7 @@ func NewSyncer(cfg *config.SubTaskConfig, etcdClient *clientv3.Client, relay rel
 
 	syncer.checkpoint = NewRemoteCheckPoint(syncer.tctx, cfg, syncer.metricsProxies, syncer.checkpointID())
 	if cfg.Blackhole {
-		syncer.blackhole = &conn.Blackhole{}
+		syncer.blackhole = conn.NewBlackhole(cfg.BlackholeLatency.Duration)
 	}
 
 	syncer.binlogType = binlogstream.RelayToBinlogType(relay)

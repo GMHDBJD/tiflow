@@ -46,6 +46,7 @@ func TaskConfigToSubTaskConfigs(c *TaskConfig, sources map[string]dbconfig.DBCon
 
 		cfg := NewSubTaskConfig()
 		cfg.Blackhole = c.Blackhole
+		cfg.BlackholeLatency = c.BlackholeLatency
 		cfg.IsSharding = c.IsSharding
 		cfg.ShardMode = c.ShardMode
 		cfg.StrictOptimisticShardMode = c.StrictOptimisticShardMode
@@ -412,6 +413,7 @@ func SubTaskConfigsToTaskConfig(stCfgs ...*SubTaskConfig) *TaskConfig {
 	c.CaseSensitive = stCfg0.CaseSensitive
 	c.TargetDB = &stCfg0.To // just ref
 	c.Blackhole = stCfg0.Blackhole
+	c.BlackholeLatency = stCfg0.BlackholeLatency
 	for _, stCfg := range stCfgs {
 		c.hasReplaySource = c.hasReplaySource || stCfg.LocalBinlog != nil || stCfg.BinlogReplay != nil
 	}

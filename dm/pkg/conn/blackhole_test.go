@@ -15,6 +15,8 @@ package conn
 
 import (
 	"context"
+	"database/sql/driver"
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -94,4 +96,84 @@ func TestBlackholeConcurrentConnections(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Equal(t, BlackholeStats{Statements: workers * batches, Parameters: workers * batches, Commits: workers * batches}, sink.Stats())
+}
+
+func TestBlackholeLatency(t *testing.T) {
+	const latency = time.Millisecond
+	sink := NewBlackhole(latency)
+	db := NewBlackholeDB(sink)
+	defer db.Close()
+	ctx := context.Background()
+	// Force connection reuse to verify transaction state is cleared on both paths.
+	db.DB.SetMaxOpenConns(1)
+	tx, err := db.DB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		_, err = tx.ExecContext(ctx, "INSERT INTO t VALUES (?)", i)
+		require.NoError(t, err)
+	}
+	require.Zero(t, sink.Stats().DelayCount)
+	require.NoError(t, tx.Commit())
+	require.Equal(t, uint64(1), sink.Stats().DelayCount)
+	require.GreaterOrEqual(t, sink.Stats().DelayNanoseconds, uint64(latency))
+	_, err = db.DB.ExecContext(ctx, "ALTER TABLE t ADD COLUMN v INT")
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), sink.Stats().DelayCount)
+	tx, err = db.DB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback())
+	require.Equal(t, uint64(2), sink.Stats().DelayCount)
+	_, err = db.DB.ExecContext(ctx, "DELETE FROM t")
+	require.NoError(t, err)
+	stats := sink.Stats()
+	require.Equal(t, uint64(3), stats.DelayCount)
+	require.Equal(t, uint64(1), stats.Commits)
+	require.Equal(t, uint64(1), stats.Rollbacks)
+	require.Equal(t, uint64(5), stats.Statements)
+}
+
+func TestBlackholeLatencyCancellation(t *testing.T) {
+	// Test the driver directly so database/sql cannot short-circuit cancellation.
+	for _, transaction := range []bool{false, true} {
+		t.Run(fmt.Sprint(transaction), func(t *testing.T) {
+			sink := NewBlackhole(time.Hour)
+			c := &blackholeConn{sink: sink}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			defer cancel()
+			if transaction {
+				tx, err := c.BeginTx(ctx, driver.TxOptions{})
+				require.NoError(t, err)
+				_, err = c.ExecContext(ctx, "INSERT INTO t VALUES (1)", nil)
+				require.NoError(t, err)
+				require.ErrorIs(t, tx.Commit(), context.DeadlineExceeded)
+				require.False(t, c.inTransaction)
+			} else {
+				_, err := c.ExecContext(ctx, "INSERT INTO t VALUES (1)", nil)
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+			}
+			require.Zero(t, sink.Stats().Commits)
+			require.Equal(t, uint64(1), sink.Stats().DelayCount)
+		})
+	}
+}
+
+func TestBlackholeLatencyConnectionsAreIndependent(t *testing.T) {
+	// A blocked connection must not hold a shared sink lock while waiting.
+	sink := NewBlackhole(time.Hour)
+	slow := &blackholeConn{sink: sink}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tx, err := slow.BeginTx(ctx, driver.TxOptions{})
+	require.NoError(t, err)
+	finished := make(chan error, 1)
+	go func() { finished <- tx.Commit() }()
+	require.Eventually(t, func() bool { return sink.Stats().DelayCount == 1 }, time.Second, time.Millisecond)
+	other := &blackholeConn{sink: sink}
+	otherTx, err := other.BeginTx(context.Background(), driver.TxOptions{})
+	require.NoError(t, err)
+	_, err = other.ExecContext(context.Background(), "INSERT INTO t VALUES (1)", nil)
+	require.NoError(t, err)
+	require.NoError(t, otherTx.Rollback())
+	cancel()
+	require.ErrorIs(t, <-finished, context.Canceled)
 }
